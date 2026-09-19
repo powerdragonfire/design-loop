@@ -31,6 +31,11 @@ export interface VersionInput {
   prompt: string;
   /** The issues still open after the gate; not recomputable once carry-forward exists. */
   openIssues: Issue[];
+  /**
+   * The version this one was edited from; null (or absent) for the first. After a regression that is the best
+   * version, not the previous one, so the issue lifecycle on the review page is measured against it.
+   */
+  parent?: string | null;
 }
 
 export interface Finalisation {
@@ -72,7 +77,7 @@ function assertSegment(what: string, value: string): void {
 }
 
 /** The temp file sits beside its target: rename is only atomic within one filesystem. */
-async function writeAtomic(file: string, content: string): Promise<void> {
+export async function writeAtomic(file: string, content: string): Promise<void> {
   const tmp = join(dirname(file), `.${randomUUID()}.tmp`);
   try {
     await writeFile(tmp, content);
@@ -103,6 +108,8 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
       const dup = critics.find((c, i) => critics.indexOf(c) !== i);
       if (dup !== undefined) throw new Error(`duplicate critique for ${dup}`);
 
+      if (v.parent != null && !written(v.parent)) throw new Error(`no such version ${v.parent} as the parent`);
+
       const version = `v${String(v.index).padStart(2, "0")}`;
       const base = join(dir, version);
       try {
@@ -120,6 +127,7 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
         writeFile(join(base, "prompt.txt"), v.prompt),
         writeFile(join(base, "open-issues.json"), json(v.openIssues)),
         ...v.critiques.map((c) => writeFile(join(base, "critiques", `${c.critic}.json`), json(c))),
+        ...(v.parent != null ? [writeFile(join(base, "parent.txt"), v.parent)] : []),
       ]);
       versions.push({ version, composite: v.composite, gatePass: v.gatePass });
       return version;

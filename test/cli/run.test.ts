@@ -170,6 +170,9 @@ describe("runScreen", () => {
     // the next round builds on the BEST version, so the failed edit's own issue must not linger
     const typography = seen.filter(s => s.critic === "typography");
     expect(typography[2].input.openIssues.map(i => i.id)).not.toContain("typography-002");
+    // v02 was edited from the BEST version, not from the regressed v01, and round 0 has no parent
+    expect(readFileSync(join(runDir(dir), "v02", "parent.txt"), "utf8")).toBe("v00");
+    expect(existsSync(join(runDir(dir), "v00", "parent.txt"))).toBe(false);
   });
 
   it("ranks a passing version first even when an earlier failing version scored higher", async () => {

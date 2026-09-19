@@ -46,6 +46,19 @@ describe("store", () => {
     expect(read(join(dir, "runs", R, "v00", "composite.json")).composite).toBe(80);
   });
 
+  it("records which version a version was edited from", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    await run.writeVersion(v(0, 80));
+    await run.writeVersion({ ...v(1, 60), parent: "v00" });
+    expect(readFileSync(join(dir, "runs", R, "v01", "parent.txt"), "utf8")).toBe("v00");
+    expect(existsSync(join(dir, "runs", R, "v00", "parent.txt"))).toBe(false);
+  });
+
+  it("rejects a parent that was never written", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    await expect(run.writeVersion({ ...v(0, 80), parent: "v07" })).rejects.toThrow(/no such version/);
+  });
+
   it("refuses to overwrite a version that already exists", async () => {
     const run = await openRun(dir, "home", "2026-09-18");
     await run.writeVersion(v(0, 80));

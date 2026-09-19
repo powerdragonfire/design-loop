@@ -87,6 +87,8 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   let carried: Issue[] = [];
   let prevOpen: Issue[] = [];
   let prevDoc: MeasuredDoc | null = null;
+  // The version the next edit is built from: null for round 0, then the chair's `buildFrom` or the previous version.
+  let parent: string | null = null;
 
   const askChair = async (input: Parameters<typeof chair>[0]) => {
     try {
@@ -141,7 +143,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       const verdict = gate(scored, det.measurementsPass, carried);
 
       const written = await run.writeVersion({
-        index: n, png, html, doc, critiques: scored, composite: score, gatePass: verdict.pass, prompt, openIssues: open,
+        index: n, png, html, doc, critiques: scored, composite: score, gatePass: verdict.pass, prompt, openIssues: open, parent,
       });
       rounds.push({ version: written, composite: score, gatePass: verdict.pass });
       records.set(written, { png, doc, critiques: scored, open, composite: score, prompt, handle });
@@ -178,7 +180,8 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       }
       prompt = next.prompt;
       // The next version is an edit of `base`, so the next round's state describes `base`, not a regressed `last`.
-      const base = next.buildFrom ? records.get(next.buildFrom)! : last;
+      parent = next.buildFrom ?? written;
+      const base = records.get(parent)!;
       baseHandle = base.handle;
       // Deterministic issues are re-measured every round, so only the LLM ones are carried.
       carried = base.open.filter((i) => !isDeterministic(i));

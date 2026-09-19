@@ -60,4 +60,22 @@ describe("decide", () => {
     expect(() => decide(seq([80]), { ...CFG, sigma: null as unknown as number }))
       .toThrow(/sigma/);
   });
+
+  it("compares against best-so-far, not the previous round: 70,80,75,79 converges", () => {
+    // 79 does not beat best (80) by > 3, but DOES beat the previous round (75)
+    // by > 3. Comparing to the previous round would wrongly call it progress.
+    expect(decide(seq([70, 80, 75, 79]), CFG)).toEqual({ stop: "converged", best: "v01" });
+  });
+
+  // decide() is the last line before an irreversible stop, so it defends its own
+  // inputs: an invalid config must throw, never silently converge or never stop.
+  it.each([
+    ["sigma NaN", { sigma: NaN }],
+    ["sigma negative", { sigma: -1 }],
+    ["convergenceSigmas NaN", { convergenceSigmas: NaN }],
+    ["convergenceRounds 0", { convergenceRounds: 0 }],
+    ["maxRounds 0", { maxRounds: 0 }],
+  ])("rejects an invalid config: %s", (_name, bad) => {
+    expect(() => decide(seq([70, 90, 95]), { ...CFG, ...bad })).toThrow(/invalid stop config/);
+  });
 });

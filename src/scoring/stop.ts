@@ -7,6 +7,17 @@ type Cfg = Pick<Config, "sigma" | "maxRounds" | "convergenceSigmas" | "convergen
 
 export function decide(rounds: RoundRecord[], cfg: Cfg): { stop: StopReason | null; best: string } {
   if (cfg.sigma == null) throw new Error("sigma is null — run `design-loop calibrate` first");
+  // Invalid numbers must throw: NaN makes every `>` false (so nothing is ever
+  // progress and it converges instantly), and convergenceRounds <= 0 makes
+  // `streak >= convergenceRounds` true with zero edits.
+  if (!Number.isFinite(cfg.sigma) || cfg.sigma < 0)
+    throw new Error(`invalid stop config: sigma must be a finite number >= 0, got ${cfg.sigma}`);
+  if (!Number.isFinite(cfg.convergenceSigmas) || cfg.convergenceSigmas < 0)
+    throw new Error(`invalid stop config: convergenceSigmas must be a finite number >= 0, got ${cfg.convergenceSigmas}`);
+  if (!Number.isInteger(cfg.convergenceRounds) || cfg.convergenceRounds < 1)
+    throw new Error(`invalid stop config: convergenceRounds must be an integer >= 1, got ${cfg.convergenceRounds}`);
+  if (!Number.isInteger(cfg.maxRounds) || cfg.maxRounds < 1)
+    throw new Error(`invalid stop config: maxRounds must be an integer >= 1, got ${cfg.maxRounds}`);
   if (rounds.length === 0) throw new Error("decide() needs at least one round");
 
   // best = highest composite; ties keep the earliest, so a later noisy

@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openRun } from "../../src/store/store.js";
+import { openRun, openExistingRun } from "../../src/store/store.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "dl-")); });
@@ -123,5 +124,56 @@ describe("store edges", () => {
     const runs = await Promise.all([1, 2, 3, 4].map(() => openRun(dir, "home", "2026-09-18")));
     expect(new Set(runs.map((r) => r.dir)).size).toBe(4);
     expect(readdirSync(join(dir, "runs")).sort()).toEqual([R, `${R}-2`, `${R}-3`, `${R}-4`]);
+  });
+
+  it("keeps aborted runs reviewable: no abortReason key on a normal finalise, and the run can still be approved", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    await run.writeVersion(v(0)); await run.writeVersion(v(1, 80));
+    await run.finalise(fin({ stopReason: "aborted", abortReason: "quota", committeeRank: ["v01", "v00"] }));
+    await run.approve("v00");
+    const m = JSON.parse(readFileSync(join(dir, "runs", R, "manifest.json"), "utf8"));
+    expect(m).toMatchObject({ stopReason: "aborted", abortReason: "quota", best: "v01", humanPick: "v00", agreedWithTop: false });
+    const other = await openRun(dir, "other", "2026-09-18");
+    await other.writeVersion(v(0));
+    await other.finalise(fin());
+    expect("abortReason" in JSON.parse(readFileSync(join(other.dir, "manifest.json"), "utf8"))).toBe(false);
+  });
+
+  it("a reopened finalised run keeps its manifest fields and refuses to write, re-finalise, or overwrite", async () => {
+    const first = await openRun(dir, "home", "2026-09-18");
+    await first.writeVersion(v(0, 70)); await first.writeVersion(v(1, 90));
+    await first.finalise(fin({ committeeRank: ["v01", "v00"], degradations: [{ version: "v01", critic: "a", error: "b" }] }));
+    const later = await openExistingRun(first.dir);
+    expect(later.dir).toBe(first.dir);
+    await expect(later.writeVersion(v(2))).rejects.toThrow(/finalised/);
+    await expect(later.finalise(fin())).rejects.toThrow(/already finalised/);
+    await later.approve("v00");
+    await expect(later.approve("v09")).rejects.toThrow(/no such version/);
+    const m = JSON.parse(readFileSync(join(first.dir, "manifest.json"), "utf8"));
+    expect(m).toMatchObject({
+      screen: "home", date: "2026-09-18", best: "v01", sigma: 3, humanPick: "v00", agreedWithTop: false,
+      degradations: [{ version: "v01", critic: "a", error: "b" }],
+    });
+  });
+
+  it("a reopened unfinalised run refuses to overwrite a version, can add the next, and can then be finalised", async () => {
+    const first = await openRun(dir, "home", "2026-09-18");
+    await first.writeVersion(v(0, 70));
+    const later = await openExistingRun(first.dir);
+    await expect(later.writeVersion(v(0, 10))).rejects.toThrow(/already exists/);
+    expect(await later.writeVersion(v(1, 85))).toBe("v01");
+    await later.finalise(fin({ committeeRank: ["v01", "v00"] }));
+    const m = JSON.parse(readFileSync(join(first.dir, "manifest.json"), "utf8"));
+    expect(m).toMatchObject({ screen: "home", date: "2026-09-18", best: "v01" });
+    expect(m.versions).toEqual([{ version: "v00", composite: 70, gatePass: false }, { version: "v01", composite: 85, gatePass: false }]);
+  });
+
+  it("refuses a directory with no version in it, and a run whose manifest or composite is unreadable", async () => {
+    const empty = await openRun(dir, "home", "2026-09-18");
+    await expect(openExistingRun(empty.dir)).rejects.toThrow(/no such run/);
+    const bad = await openRun(dir, "bad", "2026-09-18");
+    await bad.writeVersion(v(0));
+    await writeFile(join(bad.dir, "v00", "composite.json"), "{nope");
+    await expect(openExistingRun(bad.dir)).rejects.toThrow(/composite\.json/);
   });
 });

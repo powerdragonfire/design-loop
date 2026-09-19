@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openRun } from "../../src/store/store.js";
+import { openRun, openExistingRun } from "../../src/store/store.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "dl-")); });
@@ -117,5 +117,51 @@ describe("store", () => {
     expect(existsSync(join(dir, "runs", R, "v00", "approved.json"))).toBe(false);
     expect(existsSync(join(dir, "runs", R, "v01", "approved.json"))).toBe(true);
     expect(read(join(dir, "runs", R, "manifest.json")).humanPick).toBe("v01");
+  });
+
+  it("finalises an aborted run, keeping every version and recording why it stopped", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    await run.writeVersion(v(0, 70));
+    await run.finalise(fin({ stopReason: "aborted", abortReason: "Stitch quota exhausted" }));
+    const m = read(join(dir, "runs", R, "manifest.json"));
+    expect(m.stopReason).toBe("aborted");
+    expect(m.abortReason).toBe("Stitch quota exhausted");
+    expect(m.best).toBe("v00");
+  });
+});
+
+describe("openExistingRun", () => {
+  it("rebuilds a finalised run from disk so a LATER process can approve it", async () => {
+    const first = await openRun(dir, "home", "2026-09-18");
+    await first.writeVersion(v(0, 70)); await first.writeVersion(v(1, 90));
+    await first.finalise(fin({ committeeRank: ["v01", "v00"] }));
+    const later = await openExistingRun(first.dir);
+    await later.approve("v01");
+    const m = read(join(first.dir, "manifest.json"));
+    expect(m.humanPick).toBe("v01");
+    expect(m.agreedWithTop).toBe(true);
+    expect(m.versions).toHaveLength(2);
+    expect(existsSync(join(first.dir, "v01", "approved.json"))).toBe(true);
+  });
+
+  it("moves an earlier approval when a reopened run is approved again", async () => {
+    const first = await openRun(dir, "home", "2026-09-18");
+    await first.writeVersion(v(0, 70)); await first.writeVersion(v(1, 90));
+    await first.finalise(fin({ committeeRank: ["v01", "v00"] }));
+    await first.approve("v00");
+    await (await openExistingRun(first.dir)).approve("v01");
+    expect(existsSync(join(first.dir, "v00", "approved.json"))).toBe(false);
+    expect(read(join(first.dir, "manifest.json")).humanPick).toBe("v01");
+  });
+
+  it("refuses a directory that is not a run", async () => {
+    await expect(openExistingRun(join(dir, "nope"))).rejects.toThrow(/no such run/);
+  });
+
+  it("reopens an unfinalised run but cannot approve it", async () => {
+    const first = await openRun(dir, "home", "2026-09-18");
+    await first.writeVersion(v(0, 70));
+    const later = await openExistingRun(first.dir);
+    await expect(later.approve("v00")).rejects.toThrow(/not finalised/);
   });
 });

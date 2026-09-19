@@ -1,6 +1,6 @@
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Critique, Issue, MeasuredDoc } from "../types.js";
 import type { StopReason } from "../scoring/stop.js";
 
@@ -34,7 +34,9 @@ export interface VersionInput {
 }
 
 export interface Finalisation {
-  stopReason: StopReason;
+  /** "aborted" is a run cut short by a Stitch, quota or chair failure; every version already written is kept (spec §14). */
+  stopReason: StopReason | "aborted";
+  abortReason?: string;
   committeeRank: string[];
   spend: Spend;
   hallucinationRate: Record<string, number>;
@@ -81,30 +83,11 @@ async function writeAtomic(file: string, content: string): Promise<void> {
   }
 }
 
-/**
- * Claims a run directory that did not exist. The claim is a non-recursive mkdir, so a second run of the same
- * screen on the same day lands in `-2`, `-3`, ... and never touches the first run's versions (spec §11).
- */
-export async function openRun(designDir: string, screen: string, date: string): Promise<Run> {
-  assertSegment("screen", screen);
-  assertSegment("date", date);
-  const runs = join(designDir, "runs");
-  await mkdir(runs, { recursive: true });
-  const name = `${date}-${screen}`;
-  let dir = "";
-  for (let n = 1; !dir; n++) {
-    const candidate = join(runs, n === 1 ? name : `${name}-${n}`);
-    try {
-      await mkdir(candidate);
-      dir = candidate;
-    } catch (err) {
-      if (!isExists(err)) throw err;
-    }
-  }
+type Manifest = Record<string, unknown> & { committeeRank: string[] };
 
-  const versions: VersionSummary[] = [];
-  let manifest: Record<string, unknown> | null = null;
-  let committeeRank: string[] = [];
+/** Builds a Run over `dir` from what is already known; `openRun` starts empty, `openExistingRun` rebuilds. */
+function makeRun(dir: string, screen: string, date: string, versions: VersionSummary[], existing: Manifest | null): Run {
+  let manifest = existing;
   const manifestFile = join(dir, "manifest.json");
   const written = (version: string): boolean => versions.some((s) => s.version === version);
 
@@ -152,6 +135,7 @@ export async function openRun(designDir: string, screen: string, date: string): 
         screen,
         date,
         stopReason: m.stopReason,
+        abortReason: m.abortReason,
         committeeRank: m.committeeRank,
         best: m.committeeRank[0],
         versions,
@@ -162,19 +146,94 @@ export async function openRun(designDir: string, screen: string, date: string): 
       });
       await writeAtomic(manifestFile, json(next));
       manifest = next;
-      committeeRank = next.committeeRank;
     },
 
     async approve(version) {
       if (!manifest) throw new Error("run is not finalised: finalise it before approving a version");
       if (!written(version)) throw new Error(`no such version ${version}`);
-      const approved = join(dir, version, "approved.json");
-      await writeAtomic(approved, json({ version, approvedAt: new Date().toISOString() }));
-      // Exactly one approval may exist, so a changed mind moves it rather than adding a second.
+      // The manifest's humanPick is the only ground truth, so it must never lag the approval: write the new
+      // approval, then the manifest, and only then clear the old approvals. A failure in between leaves at worst
+      // a stale second approved.json, which a retry clears; readers treat manifest.humanPick as authoritative.
+      await writeAtomic(join(dir, version, "approved.json"), json({ version, approvedAt: new Date().toISOString() }));
+      const next = { ...manifest, humanPick: version, agreedWithTop: version === manifest.committeeRank[0] };
+      await writeAtomic(manifestFile, json(next));
+      manifest = next;
       await Promise.all(
         versions.filter((s) => s.version !== version).map((s) => rm(join(dir, s.version, "approved.json"), { force: true })),
       );
-      await writeAtomic(manifestFile, json({ ...manifest, humanPick: version, agreedWithTop: version === committeeRank[0] }));
     },
   };
+}
+
+/**
+ * Claims a run directory that did not exist. The claim is a non-recursive mkdir, so a second run of the same
+ * screen on the same day lands in `-2`, `-3`, ... and never touches the first run's versions (spec §11).
+ */
+export async function openRun(designDir: string, screen: string, date: string): Promise<Run> {
+  assertSegment("screen", screen);
+  assertSegment("date", date);
+  const runs = join(designDir, "runs");
+  await mkdir(runs, { recursive: true });
+  const name = `${date}-${screen}`;
+  for (let n = 1; ; n++) {
+    const dir = join(runs, n === 1 ? name : `${name}-${n}`);
+    try {
+      await mkdir(dir);
+      return makeRun(dir, screen, date, [], null);
+    } catch (err) {
+      if (!isExists(err)) throw err;
+    }
+  }
+}
+
+const parseFile = async <T>(file: string): Promise<T> => {
+  const raw = await readFile(file, "utf8");
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    throw new Error(`${file} is not valid JSON: ${(err as Error).message}`);
+  }
+};
+
+/**
+ * Reopens a run written by an earlier process, so a person can approve it after reading the report. Versions come
+ * from each `vNN/composite.json`; a `manifest.json` means the run was finalised, its absence that it was not.
+ */
+export async function openExistingRun(runDir: string): Promise<Run> {
+  let entries;
+  try {
+    entries = await readdir(runDir, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT" || (err as NodeJS.ErrnoException).code === "ENOTDIR") {
+      throw new Error(`no such run: ${runDir} does not exist`);
+    }
+    throw err;
+  }
+  const names = entries.filter((e) => e.isDirectory() && /^v\d{2}$/.test(e.name)).map((e) => e.name).sort();
+  if (names.length === 0) throw new Error(`no such run: ${runDir} holds no version directory`);
+
+  const versions: VersionSummary[] = [];
+  for (const version of names) {
+    const { composite, gatePass } = await parseFile<{ composite: number; gatePass: boolean }>(
+      join(runDir, version, "composite.json"),
+    );
+    versions.push({ version, composite, gatePass });
+  }
+
+  let manifest: Manifest | null = null;
+  try {
+    manifest = await parseFile<Manifest>(join(runDir, "manifest.json"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (manifest && !(Array.isArray(manifest.committeeRank) && manifest.committeeRank.length > 0)) {
+    throw new Error(`${join(runDir, "manifest.json")} has no committeeRank`);
+  }
+
+  // Only an unfinalised run needs these, to write its manifest later. The `-N` collision suffix is
+  // indistinguishable from a screen name ending in `-N`, so this reading is a best effort.
+  const named = /^(\d{4}-\d{2}-\d{2})-(.+?)(?:-\d+)?$/.exec(basename(runDir));
+  const screen = typeof manifest?.screen === "string" ? manifest.screen : (named?.[2] ?? basename(runDir));
+  const date = typeof manifest?.date === "string" ? manifest.date : (named?.[1] ?? "");
+  return makeRun(runDir, screen, date, versions, manifest);
 }

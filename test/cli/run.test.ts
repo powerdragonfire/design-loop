@@ -157,7 +157,8 @@ describe("runScreen", () => {
     const dir = setup(); const c = chairOf();
     const gen = new FakeGenerator([shot(30, "BEST-PNG"), shot(30, "LATEST-PNG"), ...Array(4).fill(shot(30))]);
     const hook: Hook = (critic, round) => (critic === "typography" && round === 1 ? { issues: [major("typography-002")] } : undefined);
-    await run(dir, gen, llmOf([80, 40], hook).llm, c.client);
+    const { llm, seen } = llmOf([80, 40], hook);
+    await run(dir, gen, llm, c.client);
     const bestOpen = readJson(join(runDir(dir), "v00", "open-issues.json")).map((i: Issue) => i.id);
     const second = c.inputs[1];
     expect(second.imagePng.toString()).toBe("BEST-PNG");
@@ -166,6 +167,19 @@ describe("runScreen", () => {
     expect(second.regression!.delta).toBeLessThan(0);
     expect(second.regression!.introduced.map(i => i.id)).toEqual(["typography-002"]);
     expect(c.inputs[0].regression).toBeNull();
+    // the next round builds on the BEST version, so the failed edit's own issue must not linger
+    const typography = seen.filter(s => s.critic === "typography");
+    expect(typography[2].input.openIssues.map(i => i.id)).not.toContain("typography-002");
+  });
+
+  it("ranks a passing version first even when an earlier failing version scored higher", async () => {
+    const dir = setup();
+    const out = await run(dir, new FakeGenerator([shot(30), shot(48)]), llmOf([95, 60]).llm, chairOf().client);
+    expect(out.stopReason).toBe("pass");
+    expect(out.best).toBe("v01");
+    const m = manifest(dir);
+    expect(m.committeeRank[0]).toBe("v01");
+    expect(m.best).toBe("v01");
   });
 
   it("aborts mid-run keeping every version and recording why", async () => {

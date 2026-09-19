@@ -144,10 +144,6 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       log?.(`${written}: composite ${score.toFixed(1)}, ${open.length} open, gate ${verdict.pass ? "pass" : "fail"}`);
 
       const decision = decide(rounds, cfg);
-      // Deterministic issues are re-measured every round, so only the LLM ones are carried.
-      carried = open.filter((i) => !isDeterministic(i));
-      prevOpen = open;
-      prevDoc = doc;
       if (decision.stop) return { stop: decision.stop, best: decision.best };
 
       const last = records.get(written)!;
@@ -177,7 +173,13 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
         next = await askChair(chairInput);
       }
       prompt = next.prompt;
-      baseHandle = next.buildFrom ? records.get(next.buildFrom)!.handle : last.handle;
+      // The next version is an edit of `base`, so the next round's state describes `base`, not a regressed `last`.
+      const base = next.buildFrom ? records.get(next.buildFrom)! : last;
+      baseHandle = base.handle;
+      // Deterministic issues are re-measured every round, so only the LLM ones are carried.
+      carried = base.open.filter((i) => !isDeterministic(i));
+      prevOpen = base.open;
+      prevDoc = base.doc;
     }
   };
 
@@ -193,8 +195,11 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     abortReason = err instanceof Error ? err.message : String(err);
   }
 
-  // Highest composite first; the sort is stable, so a tie keeps the earlier version.
-  const committeeRank = [...rounds].sort((a, b) => b.composite - a.composite).map((r) => r.version);
+  // A gate-passing version outranks any other, then highest composite first; the sort is stable, so a tie keeps
+  // the earlier version.
+  const committeeRank = [...rounds]
+    .sort((a, b) => Number(b.gatePass) - Number(a.gatePass) || b.composite - a.composite)
+    .map((r) => r.version);
   const total = noUsage();
   addUsage(total, criticUsage);
   addUsage(total, chairUsage);

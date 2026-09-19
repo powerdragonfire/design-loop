@@ -33,6 +33,20 @@ describe("composite", () => {
     expect(() => composite(all(80).slice(1), WEIGHTS))
       .toThrow(/weights for present critics must sum to 1/);
   });
+  it("throws when a present critic has no weight", () => {
+    const w: Record<string, number> = { ...WEIGHTS };
+    delete w.feasibility;
+    expect(() => composite(all(80), w as never))
+      .toThrow(/weights for present critics must sum to 1/);
+  });
+  it("throws on a NaN weight", () => {
+    expect(() => composite(all(80), { ...WEIGHTS, typography: NaN }))
+      .toThrow(/weights for present critics must sum to 1/);
+  });
+  it("throws on a NaN score instead of returning NaN", () => {
+    const cs = all(80); cs[0] = c("typography", NaN);
+    expect(() => composite(cs, WEIGHTS)).toThrow(/composite is not finite/);
+  });
 });
 
 describe("gate", () => {

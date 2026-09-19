@@ -6,10 +6,15 @@ import type { Config, Critique, Issue } from "../types.js";
 // versions within a run -- never compared to an absolute constant.
 export function composite(critiques: Critique[], weights: Config["weights"]): number {
   const total = critiques.reduce((sum, c) => sum + weights[c.critic], 0);
-  if (Math.abs(total - 1) > 1e-9) {
+  // Written so NaN (a missing or NaN weight) fails the check rather than slipping past it.
+  if (!(Math.abs(total - 1) <= 1e-9)) {
     throw new Error(`weights for present critics must sum to 1 (got ${total})`);
   }
-  return critiques.reduce((sum, c) => sum + weights[c.critic] * c.score, 0);
+  const result = critiques.reduce((sum, c) => sum + weights[c.critic] * c.score, 0);
+  if (!Number.isFinite(result)) {
+    throw new Error("composite is not finite: a critic score is NaN or infinite");
+  }
+  return result;
 }
 
 // Issues still open: this round's issues plus prior open issues (`carried`), de-duplicated

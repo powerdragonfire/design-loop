@@ -12,9 +12,24 @@ describe("rank", () => {
     const out = rank([iss("c", "minor", "low"), iss("a", "blocker", "low"), iss("b", "major", "low")]);
     expect(out.map(i => i.id)).toEqual(["a", "b", "c"]);
   });
-  it("breaks ties by lower effort first", () => {
+  it("ranks the cheaper of two equal-severity issues first", () => {
     const out = rank([iss("hi", "major", "high"), iss("lo", "major", "low")]);
     expect(out.map(i => i.id)).toEqual(["lo", "hi"]);
+  });
+  it("ranks by severity divided by effort: a cheap major outranks an expensive blocker (spec §8)", () => {
+    const out = rank([iss("blk", "blocker", "high"), iss("maj", "major", "low")]);
+    expect(out.map(i => i.id)).toEqual(["maj", "blk"]);
+  });
+  it("breaks equal scores by higher severity, then id", () => {
+    // minor/low = 1/1 and blocker/high = 3/3 are both 1
+    expect(rank([iss("min", "minor", "low"), iss("blk", "blocker", "high")]).map(i => i.id)).toEqual(["blk", "min"]);
+    expect(rank([iss("b", "major", "low"), iss("a", "major", "low")]).map(i => i.id)).toEqual(["a", "b"]);
+  });
+  it("does not mutate its input", () => {
+    const input = [iss("b", "minor", "low"), iss("a", "blocker", "low")];
+    const copy = [...input];
+    rank(input);
+    expect(input).toEqual(copy);
   });
 });
 
@@ -41,7 +56,7 @@ describe("chair", () => {
   });
 
   it("builds from best when the last round regressed", async () => {
-    const regression = { bestVersion: "v01", delta: -6, introduced: [] };
+    const regression = { bestVersion: "v01", delta: -6, introduced: [], failedPrompt: "p" };
     const out = await chair({ ...base, openIssues: [], regression }, CFG, client([]));
     expect(out.buildFrom).toBe("v01");
   });
@@ -111,14 +126,16 @@ describe("AnthropicChairClient", () => {
   });
 
   it("gives the best version, the delta and the introduced issues when it did, and says to build from best", async () => {
-    const regression = { bestVersion: "v01", delta: -6, introduced: [{ ...iss("z", "major", "low"), claim: "INTRODUCED-Z" }] };
+    const regression = { bestVersion: "v01", delta: -6, failedPrompt: "FAILED-PROMPT-TEXT", introduced: [{ ...iss("z", "major", "low"), claim: "INTRODUCED-Z" }] };
     const { create, client } = make(reply());
     await client.synthesise({ ...input, regression }, "claude-opus-5");
     const u = userText(sent(create));
     expect(u).toContain("v01");
     expect(u).toContain("-6");
     expect(u).toContain("INTRODUCED-Z");
+    expect(u).toContain("FAILED-PROMPT-TEXT");
     expect(u).toMatch(/build from/i);
+    expect(u).toMatch(/screenshot[^.]*best version/i);
   });
 
   it("resolves changeIds to open issues and drops unknown ids", async () => {

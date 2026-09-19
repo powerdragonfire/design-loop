@@ -6,8 +6,11 @@ export interface ChairInput {
   openIssues: Issue[];
   imagePng: Buffer;
   tokens: unknown;
-  /** Set when the last round scored below the best one: what to build from, by how much it fell, and why. */
-  regression: { bestVersion: string; delta: number; introduced: Issue[] } | null;
+  /**
+   * Set when the last round scored below the best one. The chair builds from `bestVersion` (so `imagePng` is that
+   * version's screenshot), and is told how far the last edit fell, what it introduced and the prompt that caused it.
+   */
+  regression: { bestVersion: string; delta: number; introduced: Issue[]; failedPrompt: string } | null;
 }
 
 export interface ChairClient {
@@ -24,12 +27,15 @@ const MAX_CHANGES = 3;
 const SEVERITY_WEIGHT: Record<Severity, number> = { blocker: 3, major: 2, minor: 1 };
 const EFFORT_WEIGHT: Record<Effort, number> = { low: 1, medium: 2, high: 3 };
 
-/** Most severe first, then cheapest first, then by id so equal issues always order the same way. */
+/**
+ * Highest severity / effort first (spec §8: severity x 1/effort), so a cheap major outranks an expensive blocker.
+ * Scores are compared by cross-multiplication so equal scores are exactly equal. Ties: higher severity, then id.
+ */
 export function rank(issues: Issue[]): Issue[] {
   return [...issues].sort(
     (a, b) =>
+      SEVERITY_WEIGHT[b.severity] * EFFORT_WEIGHT[a.effort] - SEVERITY_WEIGHT[a.severity] * EFFORT_WEIGHT[b.effort] ||
       SEVERITY_WEIGHT[b.severity] - SEVERITY_WEIGHT[a.severity] ||
-      EFFORT_WEIGHT[a.effort] - EFFORT_WEIGHT[b.effort] ||
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
 }
@@ -68,6 +74,7 @@ const INSTRUCTIONS = [
     "Write the single edit prompt that Stitch's `screen.edit()` will receive to improve the screen.",
   `Change at most three things. Stitch, given many simultaneous instructions, rewrites the layout wholesale and regresses, so choose the ${MAX_CHANGES} most valuable open issues and leave the rest for a later round. ` +
     "List the id of each issue you chose in `changeIds`, exactly as given; never invent an id.",
+  "Choose and order the changes by severity divided by effort, highest first: severity blocker 3, major 2, minor 1; effort low 1, medium 2, high 3.",
   "When issues conflict, the precedence is: accessibility beats behavioural beats typography beats feasibility.",
   "Write ONE self-contained natural-language prompt. Name each element you want changed, say precisely what should change, " +
     "and cite the design token values below (hex codes, sizes) rather than describing them loosely. " +
@@ -109,10 +116,12 @@ export class AnthropicChairClient implements ChairClient {
         : "No issues are open.",
     ];
     if (input.regression) {
-      const { bestVersion, delta, introduced } = input.regression;
+      const { bestVersion, delta, introduced, failedPrompt } = input.regression;
       parts.push(
         `The last edit made the design worse: its score moved by ${delta} against ${bestVersion}, the best version so far. ` +
-          `The screenshot shows the latest version, not the best one. Build from ${bestVersion} and try a different approach from the last edit.` +
+          `The attached screenshot shows ${bestVersion}, the BEST version so far, the one your new edit will be applied to. ` +
+          `Build from ${bestVersion} and try a different approach from the last edit.\n` +
+          `The edit prompt that caused this regression was:\n${failedPrompt}\nDo not repeat it.` +
           (introduced.length ? `\nIssues the failed edit introduced:\n${introduced.map(describeIssue).join("\n")}` : ""),
       );
     }

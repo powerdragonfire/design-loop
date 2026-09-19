@@ -67,6 +67,57 @@ describe("runCommittee", () => {
   });
 });
 
+describe("runCommittee failure handling", () => {
+  const httpError = (status: number) => Object.assign(new Error(`${status} upstream said no`), { status });
+  const failing = (err: unknown) => {
+    const calls = { n: 0 };
+    const llm: LlmClient = { critique: async (c) => {
+      if (c === "feasibility") { calls.n++; throw err; }
+      return stub(c);
+    }};
+    return { calls, llm };
+  };
+
+  it.each([400, 401, 403, 404, 422])("does not retry an HTTP %i, and reports the cause", async (status) => {
+    const { calls, llm } = failing(httpError(status));
+    const { dropped, failures } = await runCommittee(input, CFG, llm);
+    expect(calls.n).toBe(1);
+    expect(dropped).toEqual(["feasibility"]);
+    expect(failures).toEqual([{ critic: "feasibility", error: `${status} upstream said no` }]);
+  });
+
+  it.each([429, 500, 503])("retries an HTTP %i once", async (status) => {
+    const { calls, llm } = failing(httpError(status));
+    const { dropped, failures } = await runCommittee(input, CFG, llm);
+    expect(calls.n).toBe(2);
+    expect(dropped).toEqual(["feasibility"]);
+    expect(failures).toHaveLength(1);
+  });
+
+  it("retries an error with no status once, and reports the last message", async () => {
+    let n = 0;
+    const llm: LlmClient = { critique: async (c) => {
+      if (c === "feasibility") throw new Error(`bad json #${++n}`);
+      return stub(c);
+    }};
+    const { failures } = await runCommittee(input, CFG, llm);
+    expect(n).toBe(2);
+    expect(failures).toEqual([{ critic: "feasibility", error: "bad json #2" }]);
+  });
+
+  it("keeps a critic that fails once and then succeeds, with no trace in dropped or failures", async () => {
+    let n = 0;
+    const llm: LlmClient = { critique: async (c) => {
+      if (c === "feasibility" && ++n === 1) throw new Error("flaky");
+      return stub(c);
+    }};
+    const { critiques, dropped, failures } = await runCommittee(input, CFG, llm);
+    expect(critiques.map(c => c.critic)).toContain("feasibility");
+    expect(dropped).toEqual([]);
+    expect(failures).toEqual([]);
+  });
+});
+
 describe("AnthropicLlmClient", () => {
   const good = (over: Record<string, unknown> = {}) => ({
     stop_reason: "end_turn",
@@ -116,8 +167,30 @@ describe("AnthropicLlmClient", () => {
     expect(fmt.type).toBe("json_schema");
     const item = fmt.schema.properties.issues.items;
     expect(item.properties.severity.enum).toEqual(["blocker", "major", "minor"]);
+    expect(item.properties.effort.enum).toEqual(["low", "medium", "high"]);
     expect(item.required).toContain("id");
-    expect(item.properties.id.minLength).toBe(1);
+    expect(item.properties.evidence.required).toContain("selector");
+  });
+
+  // Structured outputs 400 on unsupported constraint keywords, which would drop all four critics
+  // every round; non-empty id/selector and the score range are enforced by parseCritique instead.
+  it("uses only JSON-schema keywords structured outputs accept", async () => {
+    const { create, client } = make(good());
+    await client.critique("typography", inp, "m");
+    const ALLOWED = new Set(["type", "properties", "required", "items", "enum", "additionalProperties", "description"]);
+    const walk = (node: any, path: string) => {
+      for (const key of Object.keys(node)) expect(ALLOWED.has(key), `${path}.${key}`).toBe(true);
+      if (node.type === "object") expect(node.additionalProperties, path).toBe(false);
+      for (const [k, v] of Object.entries(node.properties ?? {})) walk(v, `${path}.${k}`);
+      if (node.items) walk(node.items, `${path}[]`);
+    };
+    walk(sent(create).output_config.format.schema, "$");
+  });
+
+  it("leaves room for adaptive thinking in max_tokens", async () => {
+    const { create, client } = make(good());
+    await client.critique("typography", inp, "m");
+    expect(sent(create).max_tokens).toBe(16000);
   });
 
   it("zeroes resolved.verified from model output: a model never verifies itself", async () => {
@@ -220,5 +293,30 @@ describe("AnthropicLlmClient", () => {
     const { create, client } = make(good());
     await expect(client.critique("tokenConformance", inp, "m")).rejects.toThrow(/not an LLM critic/);
     expect(create).not.toHaveBeenCalled();
+  });
+  it("renumbers an id that duplicates an earlier one in the same reply", async () => {
+    const issue = (id: string) => ({ id, severity: "major", evidence: { selector: "#b1", observed: "o" }, claim: "c", fix: "f", effort: "low" });
+    const { client } = make(good({ issues: [issue("001"), issue("typography-001"), issue("typography-001"), issue("typography-001-2")] }));
+    const c = await client.critique("typography", inp, "m");
+    expect(c.issues.map(i => i.id)).toEqual(["typography-001", "typography-001-3", "typography-001-4", "typography-001-2"]);
+  });
+
+  it("tells the model where its numbering resumes, in the volatile message and not the cached prefix", async () => {
+    const open = (id: string) => ({ id, severity: "major", evidence: { selector: "#b1", observed: "o" }, claim: "c", fix: "f", effort: "low" }) as const;
+    const withOpen = { ...inp, openIssues: [open("typography-003"), open("accessibility-009"), open("det-tap-#b1")] };
+    const t = make(good());
+    await t.client.critique("typography", withOpen, "m");
+    expect(text(sent(t.create).messages[0].content)).toContain("`typography-004`");
+    expect(text(sent(t.create).messages[0].content)).toContain("existing id");
+    expect(text(sent(t.create).system)).not.toContain("typography-004");
+    const a = make(good({ critic: "accessibility" }));
+    await a.client.critique("accessibility", withOpen, "m");
+    expect(text(sent(a.create).messages[0].content)).toContain("`accessibility-010`");
+  });
+
+  it("starts numbering at 001 when the critic has no open issues", async () => {
+    const { create, client } = make(good());
+    await client.critique("typography", inp, "m");
+    expect(text(sent(create).messages[0].content)).toContain("`typography-001`");
   });
 });

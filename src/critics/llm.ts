@@ -23,27 +23,42 @@ type LlmCriticName = (typeof LLM_CRITICS)[number];
 
 const isLlmCritic = (c: CriticName): c is LlmCriticName => (LLM_CRITICS as readonly string[]).includes(c);
 
-export async function runCommittee(
-  input: CriticInput, cfg: Config, llm: LlmClient,
-): Promise<{ critiques: Critique[]; dropped: CriticName[] }> {
+export interface CommitteeResult {
+  critiques: Critique[];
+  dropped: CriticName[];
+  /** The last error message per dropped critic: a 400, a missing rubric and bad JSON must not look alike. */
+  failures: { critic: CriticName; error: string }[];
+}
+
+// Retrying cannot fix a request the API has rejected outright. 429, 5xx, timeouts, parse errors
+// and errors with no status are transient or model-side, so they get one more attempt.
+const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 422]);
+const retryable = (e: unknown): boolean => !NON_RETRYABLE_STATUS.has((e as { status?: number } | null)?.status as number);
+
+export async function runCommittee(input: CriticInput, cfg: Config, llm: LlmClient): Promise<CommitteeResult> {
   const model = cfg.models.critic;
   // One retry per critic, inline, so a retry does not wait for the slowest sibling.
   const attempt = async (c: LlmCriticName): Promise<Critique> => {
     try {
       return await llm.critique(c, input, model);
-    } catch {
+    } catch (e) {
+      if (!retryable(e)) throw e;
       return await llm.critique(c, input, model);
     }
   };
   const settled = await Promise.allSettled(LLM_CRITICS.map(attempt));
-  const critiques: Critique[] = [];
-  const dropped: CriticName[] = [];
+  const result: CommitteeResult = { critiques: [], dropped: [], failures: [] };
   settled.forEach((r, i) => {
-    if (r.status === "fulfilled") critiques.push(r.value);
+    const critic = LLM_CRITICS[i]!;
+    if (r.status === "fulfilled") {
+      result.critiques.push(r.value);
+      return;
+    }
     // Named, never silent: Task 12 renormalises the weights over the survivors (spec §14).
-    else dropped.push(LLM_CRITICS[i]!);
+    result.dropped.push(critic);
+    result.failures.push({ critic, error: r.reason instanceof Error ? r.reason.message : String(r.reason) });
   });
-  return { critiques, dropped };
+  return result;
 }
 
 // ---- the Anthropic client ----------------------------------------------------
@@ -57,20 +72,22 @@ const SEVERITIES = ["blocker", "major", "minor"] as const;
 const EFFORTS = ["low", "medium", "high"] as const;
 const CRITIC_NAMES = ["typography", "behavioural", "accessibility", "tokenConformance", "feasibility"] as const;
 
-// Pins the Critique shape. The enums and the non-empty id matter: Task 5's gate treats an
-// unknown severity or an empty id as "not open", so without them it could pass with a live issue.
+// Pins the Critique shape. Only keywords structured outputs accept: any string or numeric constraint
+// (minLength, minimum, ...) is a 400 that would drop all four critics. Non-empty id/selector and the
+// score range are enforced by parseCritique; the enums matter because Task 5's gate treats an unknown
+// severity or an empty id as "not open", so without them it could pass with a live issue.
 const ISSUE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["id", "severity", "evidence", "claim", "fix", "effort"],
   properties: {
-    id: { type: "string", minLength: 1 },
+    id: { type: "string" },
     severity: { type: "string", enum: [...SEVERITIES] },
     evidence: {
       type: "object",
       additionalProperties: false,
       required: ["selector", "observed"],
-      properties: { selector: { type: "string", minLength: 1 }, observed: { type: "string" } },
+      properties: { selector: { type: "string" }, observed: { type: "string" } },
     },
     claim: { type: "string" },
     fix: { type: "string" },
@@ -123,6 +140,17 @@ function parseCritique(critic: CriticName, raw: unknown): Critique {
   }
   if (!Array.isArray(raw.issues)) return invalid(critic, "issues is not an array");
   const prefix = `${critic}-`;
+  const prefixed = (id: string) => (id.startsWith(prefix) ? id : prefix + id);
+  // Every id in the reply, so a renumbered duplicate cannot collide with a later issue.
+  const taken = new Set<string>(raw.issues.map((i: any) => (isNonEmpty(i?.id) ? prefixed(i.id) : "")));
+  const seen = new Set<string>();
+  // The first occurrence keeps its id; later ones get -2, -3, ..., skipping ids used elsewhere in the reply.
+  const unique = (id: string): string => {
+    let out = id;
+    for (let n = 2; seen.has(out) || (out !== id && taken.has(out)); n++) out = `${id}-${n}`;
+    seen.add(out);
+    return out;
+  };
   const issues = raw.issues.map((i: unknown, n: number): Issue => {
     if (!isObj(i)) return invalid(critic, `issue ${n} is not an object`);
     if (!isNonEmpty(i.id)) return invalid(critic, `issue ${n} has no id`);
@@ -131,7 +159,7 @@ function parseCritique(critic: CriticName, raw: unknown): Critique {
     if (!isObj(i.evidence) || !isNonEmpty(i.evidence.selector)) return invalid(critic, `issue ${n} cites no selector`);
     return {
       // Prefixing keeps ids collision-free across critics and keeps `det-` reserved for the deterministic pass.
-      id: i.id.startsWith(prefix) ? i.id : prefix + i.id,
+      id: unique(prefixed(i.id)),
       severity: i.severity,
       evidence: { selector: i.evidence.selector, observed: String(i.evidence.observed ?? "") },
       claim: String(i.claim ?? ""),
@@ -147,6 +175,13 @@ function parseCritique(critic: CriticName, raw: unknown): Critique {
     // A model never verifies itself: verification is mechanical (Task 4).
     resolved: { claimed: raw.resolved.claimed.map(String), verified: [] },
   };
+}
+
+/** Next free number for this critic's NEW issues: max numeric suffix among its open ids, plus one. */
+function nextIssueId(critic: CriticName, open: Issue[]): string {
+  const re = new RegExp(`^${critic}-(\\d+)`);
+  const max = open.reduce((m, i) => Math.max(m, Number(re.exec(i.id)?.[1] ?? 0)), 0);
+  return `${critic}-${String(max + 1).padStart(3, "0")}`;
 }
 
 type Sdk = { messages: { create(params: any): Promise<any> } };
@@ -178,6 +213,8 @@ export class AnthropicLlmClient implements LlmClient {
       input.openIssues.length
         ? `Open issues from earlier rounds. List the id under resolved.claimed only if now fixed:\n${JSON.stringify(input.openIssues, null, 2)}`
         : "No issues are open from earlier rounds.",
+      // Volatile, so it lives here and not in the cached prefix.
+      `Number any NEW issue starting at \`${nextIssueId(critic, input.openIssues)}\`; re-list a persisting issue under its existing id.`,
     ];
     if (critic === "accessibility") {
       parts.push(`Deterministic measurements (facts, do not contradict):\n${JSON.stringify(input.measurements, null, 2)}`);
@@ -189,7 +226,8 @@ export class AnthropicLlmClient implements LlmClient {
 
     const res = await this.sdk.messages.create({
       model,
-      max_tokens: 8000,
+      // Adaptive thinking tokens count toward this; a truncation is retried identically, then dropped.
+      max_tokens: 16000,
       thinking: { type: "adaptive" },
       output_config: { effort: "medium", format: { type: "json_schema", schema: CRITIQUE_SCHEMA } },
       system,

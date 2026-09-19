@@ -18,7 +18,7 @@ You score ONE dimension of a mobile screen design: **feasibility of building it 
 
 ## Issues and ids
 
-Report each deduction as one issue with severity (blocker: cannot be built in React Native without a redesign or a native module; major: expensive or fragile to build; minor: small extra cost), evidence (the selector and what you observed, quoting the digest), a one-sentence claim, a concrete cheaper alternative as the fix and an effort estimate. Prefix every issue id with your critic name and a dash, e.g. `feasibility-001`; when marking an earlier issue resolved, use its existing id unchanged.
+Report each deduction as one issue with severity (blocker: cannot be built in React Native without a redesign or a native module; major: expensive or fragile to build; minor: small extra cost), evidence (the selector and what you observed, quoting the digest), a one-sentence claim, a concrete cheaper alternative as the fix and an effort estimate. Prefix every issue id with your critic name and a dash, e.g. `feasibility-001`, and continue numbering from the number given in the request rather than restarting at 001. When an earlier issue still stands, re-list it under its existing id unchanged; when marking an earlier issue resolved, use its existing id unchanged.
 
 Only list an earlier open issue under `resolved.claimed` if the current digest and screenshot show it fixed. Your claim is checked mechanically afterwards.
 

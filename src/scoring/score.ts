@@ -1,4 +1,4 @@
-import type { Config, Critique, Issue } from "../types.js";
+import type { Config, CriticName, Critique, Issue } from "../types.js";
 
 // Weighted mean over the critiques present. A critic dropped upstream is simply absent;
 // the caller renormalises the weights to the survivors first, so a partial committee is
@@ -46,4 +46,16 @@ export function gate(
   }
   if (!measurementsPass) reasons.push("one or more deterministic measurements failed");
   return { pass: reasons.length === 0, reasons };
+}
+
+// Scales the weights of the critics still present so they sum to 1, and gives an absent
+// critic weight 0 so the result still has every key. A dropped critic's share is thereby
+// spread over the survivors in proportion to their own weights.
+export function renormalise(weights: Config["weights"], present: CriticName[]): Config["weights"] {
+  const keep = new Set(present);
+  const total = [...keep].reduce((sum, c) => sum + weights[c], 0);
+  if (keep.size === 0 || !(total > 0)) throw new Error("no critics survived this round");
+  const out = { ...weights };
+  for (const c of Object.keys(out) as CriticName[]) out[c] = keep.has(c) ? weights[c] / total : 0;
+  return out;
 }

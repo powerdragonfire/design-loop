@@ -17,6 +17,9 @@ function line(n: MeasuredNode): string {
   return [
     n.selector,
     `<${n.tag}${n.role ? ` role=${n.role}` : ""}>`,
+    // Containment is otherwise recoverable only by bbox inclusion, which is
+    // implicit and costly for an LLM; depth is the cheap structural skeleton.
+    n.depth !== undefined ? `d=${n.depth}` : "",
     `[${round1(x)},${round1(y)} ${round1(w)}x${round1(h)}]`,
     styleKV,
     n.text ? JSON.stringify(n.text) : "",

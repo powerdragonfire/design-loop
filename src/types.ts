@@ -27,6 +27,8 @@ export interface MeasuredNode {
   text: string;
   bbox: { x: number; y: number; w: number; h: number };
   style: Record<string, string>;
+  /** Ancestor elements between this node and <body>; direct children of body are 0. */
+  depth?: number;
 }
 
 export interface MeasuredDoc {

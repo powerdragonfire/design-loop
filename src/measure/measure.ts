@@ -51,6 +51,11 @@ export async function measure(html: string): Promise<MeasuredDoc> {
         }
         return "rgb(255, 255, 255)"; // the browser paints a white canvas by default
       }
+      function depthOf(el: Element): number {
+        let d = 0;
+        for (let cur = el.parentElement; cur && cur !== document.body; cur = cur.parentElement) d++;
+        return d;
+      }
       const out: any[] = [];
       for (const el of Array.from(document.body.querySelectorAll("*"))) {
         const cs = getComputedStyle(el);
@@ -75,6 +80,7 @@ export async function measure(html: string): Promise<MeasuredDoc> {
             .slice(0, 120),
           bbox: { x: r.x, y: r.y, w: r.width, h: r.height },
           style,
+          depth: depthOf(el),
         });
       }
       return out;

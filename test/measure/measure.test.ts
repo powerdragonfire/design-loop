@@ -57,4 +57,10 @@ describe("measure", () => {
     expect(sels).not.toContain("#a");
     expect(sels).toContain("#b\\:c");
   });
+
+  it("reports depth as the number of ancestors between a node and <body>", async () => {
+    const doc = await measure(`<div id="a"><div id="b"><p id="c">x</p></div></div>`);
+    const depth = (sel: string) => doc.nodes.find(n => n.selector === sel)!.depth;
+    expect(["#a", "#b", "#c"].map(depth)).toEqual([0, 1, 2]);
+  });
 }, 30_000);

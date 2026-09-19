@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import type { MeasuredDoc } from "../../src/types.js";
+import type { MeasuredDoc, MeasuredNode } from "../../src/types.js";
 import { measure } from "../../src/measure/measure.js";
 import { distill, estimateTokens } from "../../src/distill/distill.js";
 
@@ -79,5 +79,37 @@ describe("distill (pure function contract)", () => {
     const snapshot = JSON.stringify(doc);
     expect(distill(doc)).toBe(distill(doc));
     expect(JSON.stringify(doc)).toBe(snapshot);
+  });
+});
+
+describe("distill depth", () => {
+  const node = (over: Partial<MeasuredNode>): MeasuredNode => ({
+    selector: "#n", tag: "div", role: null, text: "",
+    bbox: { x: 0, y: 0, w: 10, h: 10 }, style: {}, ...over,
+  });
+
+  it("emits d=<depth> between the tag field and the bbox", () => {
+    const doc: MeasuredDoc = { viewport: { w: 393, h: 852 }, nodes: [node({ depth: 2, role: "button" })] };
+    expect(distill(doc).split("\n")[1]).toBe("#n <div role=button> d=2 [0,0 10x10]");
+  });
+
+  it("emits d=0 for direct children of body", () => {
+    const doc: MeasuredDoc = { viewport: { w: 393, h: 852 }, nodes: [node({ depth: 0 })] };
+    expect(distill(doc).split("\n")[1]).toBe("#n <div> d=0 [0,0 10x10]");
+  });
+
+  it("omits the d= field when depth is undefined", () => {
+    const doc: MeasuredDoc = { viewport: { w: 393, h: 852 }, nodes: [node({})] };
+    expect(distill(doc)).not.toMatch(/\bd=/);
+  });
+
+  it("keeps the selector first and byte-for-byte on a nested doc", () => {
+    const sels = ["#a", "main:nth-of-type(1) > div:nth-of-type(2)", "#c"];
+    const doc: MeasuredDoc = {
+      viewport: { w: 393, h: 852 },
+      nodes: sels.map((selector, i) => node({ selector, depth: i })),
+    };
+    const lines = distill(doc).split("\n").slice(1);
+    lines.forEach((l, i) => expect(l.startsWith(`${sels[i]} <div> d=${i} `)).toBe(true));
   });
 });

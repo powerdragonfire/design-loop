@@ -40,16 +40,33 @@ export function rank(issues: Issue[]): Issue[] {
   );
 }
 
+/**
+ * The cap has to reach Stitch, not just our own bookkeeping: the model writes prose for every change it
+ * chose, so truncating the list while forwarding its prompt verbatim would still ask for all of them
+ * (spec §8, §14). When it overran, the prompt is rebuilt from the kept issues' own `fix` texts.
+ */
+function capPrompt(changes: Issue[]): string {
+  const lines = changes.map((c, n) => `${n + 1}. ${c.fix} (element: ${c.evidence.selector})`);
+  return [
+    `Make exactly these ${changes.length} changes and nothing else:`,
+    ...lines,
+    "Keep everything else on the screen exactly as it is.",
+  ].join("\n");
+}
+
 export async function chair(
   input: ChairInput,
   cfg: Config,
   client: ChairClient,
-): Promise<{ prompt: string; changes: Issue[]; buildFrom: string | null }> {
+): Promise<{ prompt: string; changes: Issue[]; buildFrom: string | null; requested: number }> {
   const { prompt, changes } = await client.synthesise(input, cfg.models.chair);
+  const kept = rank(changes).slice(0, MAX_CHANGES);
   return {
-    prompt,
-    changes: rank(changes).slice(0, MAX_CHANGES),
+    // Under the cap the model's own prompt is richer than any template, so it is kept untouched.
+    prompt: changes.length > MAX_CHANGES ? capPrompt(kept) : prompt,
+    changes: kept,
     buildFrom: input.regression?.bestVersion ?? null,
+    requested: changes.length,
   };
 }
 
@@ -151,8 +168,9 @@ export class AnthropicChairClient implements ChairClient {
     if (res.stop_reason === "refusal" || res.stop_reason === "max_tokens") {
       throw new Error(`chair stopped with ${res.stop_reason}`);
     }
-    // A fallback response may also carry `fallback` blocks; only the text block is the reply.
-    const block = (res.content ?? []).find((b: any) => b.type === "text");
+    // A fallback response carries `fallback` blocks, and a mid-stream decline can leave partial text
+    // BEFORE them, so the reply is the last text block, never the first.
+    const block = (res.content ?? []).filter((b: any) => b.type === "text").at(-1);
     if (!block) throw new Error("chair returned no text block");
     let raw: unknown;
     try {

@@ -60,6 +60,34 @@ describe("chair", () => {
     const out = await chair({ ...base, openIssues: [], regression }, CFG, client([]));
     expect(out.buildFrom).toBe("v01");
   });
+
+  it("reports how many changes the model asked for, before the cap", async () => {
+    const five = ["a", "b", "c", "d", "e"].map(id => iss(id, "blocker", "low"));
+    const over = await chair({ ...base, openIssues: five }, CFG, client(five));
+    expect(over.requested).toBe(5);
+    const two = five.slice(0, 2);
+    const under = await chair({ ...base, openIssues: two }, CFG, client(two));
+    expect(under.requested).toBe(2);
+  });
+
+  it("rebuilds the prompt from the top three when the model asked for more, so the cap reaches Stitch", async () => {
+    const fixes = ["a", "b", "c", "d", "e"].map((id, n) =>
+      ({ ...iss(id, n === 4 ? "blocker" : "minor", "low"), fix: `FIX-${id}` }));
+    const out = await chair({ ...base, openIssues: fixes }, CFG, client(fixes));
+    expect(out.prompt).toBe(
+      "Make exactly these 3 changes and nothing else:\n"
+      + "1. FIX-e (element: #e)\n2. FIX-a (element: #a)\n3. FIX-b (element: #b)\n"
+      + "Keep everything else on the screen exactly as it is.",
+    );
+    expect(out.changes.map(i => i.id)).toEqual(["e", "a", "b"]);
+    expect(out.prompt).not.toContain("do it");
+  });
+
+  it("keeps the model's own prompt when it asked for three or fewer", async () => {
+    const three = ["a", "b", "c"].map(id => iss(id, "blocker", "low"));
+    const out = await chair({ ...base, openIssues: three }, CFG, client(three));
+    expect(out.prompt).toBe("do it");
+  });
 });
 
 describe("AnthropicChairClient", () => {
@@ -159,6 +187,20 @@ describe("AnthropicChairClient", () => {
     await expect(make({ ...reply(), stop_reason: "max_tokens" }).client.synthesise(input, "m")).rejects.toThrow(/max_tokens/);
     await expect(make({ ...reply(), content: [{ type: "text", text: "nope" }] }).client.synthesise(input, "m")).rejects.toThrow(/JSON/i);
     await expect(make(reply({ prompt: "  " })).client.synthesise(input, "m")).rejects.toThrow(/prompt/i);
+  });
+
+  it("reads the LAST text block, so a fallback's partial text before it is not mistaken for the reply", async () => {
+    const answer = JSON.stringify({ prompt: "Make the CTA 48px tall.", changeIds: ["a"] });
+    const { client } = make({
+      ...reply(),
+      content: [
+        { type: "text", text: "I cannot hel" },
+        { type: "fallback", model: "claude-sonnet-5" },
+        { type: "text", text: answer },
+      ],
+    });
+    const out = await client.synthesise(input, "claude-opus-5");
+    expect(out.prompt).toBe("Make the CTA 48px tall.");
   });
 
   it("accumulates token usage and resets it when taken", async () => {

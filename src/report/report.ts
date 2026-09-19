@@ -19,6 +19,12 @@ interface ManifestView {
   agreedWithTop?: boolean;
 }
 
+/** `vNN/changes.json`: what the chair asked the edit that produced this version to change. */
+interface ChangesView {
+  requested: number;
+  applied: { id: string; claim: string }[];
+}
+
 interface VersionView {
   name: string;
   composite: number;
@@ -28,6 +34,7 @@ interface VersionView {
   parent: string | null;
   open: Issue[];
   critiques: Critique[];
+  changes: ChangesView | null;
 }
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -61,6 +68,11 @@ async function readOptional(file: string): Promise<string | null> {
   }
 }
 
+async function readOptionalJson<T>(file: string): Promise<T | null> {
+  const raw = await readOptional(file);
+  return raw === null ? null : parseJson<T>(file, raw);
+}
+
 async function readVersion(runDir: string, name: string): Promise<VersionView> {
   const dir = join(runDir, name);
   const { composite, gatePass } = await readJson<{ composite: number; gatePass: boolean }>(join(dir, "composite.json"));
@@ -74,6 +86,7 @@ async function readVersion(runDir: string, name: string): Promise<VersionView> {
     parent: (await readOptional(join(dir, "parent.txt")))?.trim() || null,
     open: await readJson<Issue[]>(join(dir, "open-issues.json")),
     critiques: await Promise.all(files.map((f) => readJson<Critique>(join(dir, "critiques", f)))),
+    changes: await readOptionalJson<ChangesView>(join(dir, "changes.json")),
   };
 }
 
@@ -161,6 +174,16 @@ function lifecycle(v: VersionView, parent: VersionView | null): string {
   return items.join("");
 }
 
+/** What this version's edit was asked to change: the only record of what a round was trying to fix. */
+function targeted(c: ChangesView | null): string {
+  if (!c || c.applied.length === 0) return "";
+  const items = c.applied.map((i) => `<li><code>${esc(i.id)}</code><br>${esc(i.claim)}</li>`).join("");
+  const over = c.requested > c.applied.length
+    ? `<p class="muted">The chair asked for ${esc(c.requested)} changes; the top ${esc(c.applied.length)} were kept.</p>`
+    : "";
+  return `<h3>This edit targeted</h3><ul class="issues">${items}</ul>${over}`;
+}
+
 function versionSection(v: VersionView, prev: VersionView | null, parent: VersionView | null, m: ManifestView | null, runDir: string): string {
   const approved = m?.humanPick === v.name;
   const badges = [
@@ -184,6 +207,7 @@ ${dropped.length > 0 ? `<p class="gate fail">Critic dropped this round: ${droppe
 ${v.parent ? `<p class="muted">built from ${esc(v.parent)}</p>` : ""}
 ${m?.committeeRank ? command(`design-loop approve ${shellQuote(runDir)} ${v.name}`) : ""}
 <details><summary>Prompt that produced this version</summary><pre>${esc(v.prompt)}</pre></details>
+${targeted(v.changes)}
 <h3>Issues${parent ? ` <span class="muted">against ${esc(parent.name)}</span>` : ""}</h3>
 ${issues ? `<ul class="issues">${issues}</ul>` : `<p class="muted">None open.</p>`}
 </section>`;

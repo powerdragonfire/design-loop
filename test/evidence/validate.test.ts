@@ -148,4 +148,30 @@ describe("promoteResolutions", () => {
     expect(out[0].resolved.claimed).toEqual(["old-1", "ghost"]);
     expect(c).toEqual(snapshot);
   });
+
+  const textOf = (t: string): MeasuredDoc => ({
+    viewport: { w: 393, h: 852 },
+    nodes: [{ ...node("#real", "rgb(1, 1, 1)"), text: t }],
+  });
+
+  it("verifies a claim when only the element's own TEXT changed, so a copy fix can close", () => {
+    const c = critique({ resolved: { claimed: ["old-1"], verified: [] } });
+    const out = promoteResolutions([c], textOf("Tap here"), textOf("Create your account"), prevIssues);
+    expect(out[0].resolved.verified).toEqual(["old-1"]);
+  });
+
+  it("never verifies a claim on a det- id, however much the element changed: only re-measuring closes one", () => {
+    const detIssues = [issue("det-tap-#real", "#real")];
+    const before: MeasuredDoc = {
+      viewport: { w: 393, h: 852 },
+      nodes: [{ ...node("#real", "rgb(1, 1, 1)"), text: "Go", bbox: { x: 0, y: 0, w: 30, h: 30 } }],
+    };
+    const after: MeasuredDoc = {
+      viewport: { w: 393, h: 852 },
+      nodes: [{ ...node("#real", "rgb(9, 9, 9)"), text: "Start", bbox: { x: 0, y: 0, w: 48, h: 48 } }],
+    };
+    const c = critique({ resolved: { claimed: ["det-tap-#real"], verified: [] } });
+    const out = promoteResolutions([c], before, after, detIssues);
+    expect(out[0].resolved.verified).toEqual([]);
+  });
 });

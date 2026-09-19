@@ -74,6 +74,28 @@ describe("store", () => {
     expect(existsSync(a.dir) && existsSync(b.dir)).toBe(true);
   });
 
+  it("records the chair changes that produced a version, and how many the chair asked for", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    const applied = [{
+      id: "typography-001", severity: "major" as const, evidence: { selector: "#b1", observed: "12px" },
+      claim: "too small", fix: "use 16px", effort: "low" as const,
+    }];
+    await run.writeVersion(v(0, 70));
+    await run.writeVersion({ ...v(1, 80), parent: "v00", changes: { requested: 5, applied } });
+    const file = join(dir, "runs", R, "v01", "changes.json");
+    expect(read(file)).toEqual({
+      requested: 5,
+      applied: [{ id: "typography-001", severity: "major", effort: "low", claim: "too small", fix: "use 16px", selector: "#b1" }],
+    });
+    expect(readFileSync(file, "utf8")).toBe(`${JSON.stringify(read(file), null, 2)}\n`);
+  });
+
+  it("writes no changes.json for a version no chair edit produced, such as round 0", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    await run.writeVersion(v(0, 70));
+    expect(existsSync(join(dir, "runs", R, "v00", "changes.json"))).toBe(false);
+  });
+
   it("records the stop reason, spend, sigma, versions, degradations and hallucination rates in the manifest", async () => {
     const run = await openRun(dir, "home", "2026-09-18");
     await run.writeVersion(v(0, 70)); await run.writeVersion(v(1, 85, true));

@@ -41,14 +41,14 @@ const llmOf = (scores: number[], hook: Hook = () => undefined) => {
   };
   return { llm, seen };
 };
-const chairOf = (failFirst = 0) => {
+const chairOf = (failFirst = 0, changes: Issue[] = []) => {
   const inputs: ChairInput[] = [];
   let calls = 0;
   const client: ChairClient = {
     synthesise: async (input) => {
       calls++; inputs.push(input);
       if (calls <= failFirst) throw new Error("chair down");
-      return { prompt: "make the button bigger", changes: [] };
+      return { prompt: "make the button bigger", changes };
     },
     takeUsage: () => ({ inputTokens: 500, outputTokens: 50, cachedTokens: 0 }),
   };
@@ -270,5 +270,43 @@ describe("runScreen", () => {
     expect(a11y.some(id => id.startsWith("det-token-"))).toBe(false);
     const det = readJson(join(runDir(dir), "v00", "critiques", "tokenConformance.json")).issues.map((i: Issue) => i.id);
     expect(det.some((id: string) => id.startsWith("det-token-"))).toBe(true);
+  });
+
+  it("never lets a critic verify a deterministic issue away: the measured blocker stays open", async () => {
+    const dir = setup(); const c = chairOf();
+    // The button grows but stays under 44px, so det-tap-#b1 is re-measured as failing every round.
+    const gen = new FakeGenerator([shot(30), ...Array(5).fill(shot(36))]);
+    const hook: Hook = (critic, round) =>
+      critic === "accessibility" && round >= 1 ? { resolved: { claimed: ["det-tap-#b1"], verified: [] } } : undefined;
+    await run(dir, gen, llmOf([70, 80], hook).llm, c.client);
+    const open = readJson(join(runDir(dir), "v01", "open-issues.json")).map((i: Issue) => i.id);
+    expect(open).toContain("det-tap-#b1");
+    expect(c.inputs[1].openIssues.map(i => i.id)).toContain("det-tap-#b1");
+    const a11y = readJson(join(runDir(dir), "v01", "critiques", "accessibility.json"));
+    expect(a11y.resolved.verified).toEqual([]);
+  });
+
+  it("records on each version the chair changes the edit that produced it was asked to make", async () => {
+    const dir = setup(); const gen = new FakeGenerator([shot(30), shot(48)]);
+    const two = ["a", "b"].map(id => major(`typography-${id}`));
+    await run(dir, gen, llmOf([70, 80]).llm, chairOf(0, two).client);
+    expect(existsSync(join(runDir(dir), "v00", "changes.json"))).toBe(false);
+    const ch = readJson(join(runDir(dir), "v01", "changes.json"));
+    expect(ch.requested).toBe(2);
+    expect(ch.applied.map((i: { id: string }) => i.id)).toEqual(["typography-a", "typography-b"]);
+    expect(gen.prompts[1]).toBe("make the button bigger");
+  });
+
+  it("truncates a chair that overran the three-change cap: it says so, and Stitch gets the capped prompt", async () => {
+    const dir = setup(); const gen = new FakeGenerator([shot(30), shot(48)]); const lines: string[] = [];
+    const five = ["a", "b", "c", "d", "e"].map(id => ({ ...major(`typography-${id}`), fix: `FIX-${id}` }));
+    await run(dir, gen, llmOf([70, 80]).llm, chairOf(0, five).client, { log: (l: string) => lines.push(l) });
+    expect(lines).toContain("chair returned 5 changes; keeping the top 3");
+    expect(gen.prompts[1]).toContain("Make exactly these 3 changes and nothing else:");
+    expect(gen.prompts[1]).toContain("FIX-a (element: #b1)");
+    expect(gen.prompts[1]).not.toContain("FIX-d");
+    const ch = readJson(join(runDir(dir), "v01", "changes.json"));
+    expect(ch.requested).toBe(5);
+    expect(ch.applied.map((i: { id: string }) => i.id)).toEqual(["typography-a", "typography-b", "typography-c"]);
   });
 }, 240_000);

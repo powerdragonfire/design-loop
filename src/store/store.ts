@@ -36,6 +36,12 @@ export interface VersionInput {
    * version, not the previous one, so the issue lifecycle on the review page is measured against it.
    */
   parent?: string | null;
+  /**
+   * The chair changes the edit that PRODUCED this version was asked to make: `applied` after the three-change
+   * cap, `requested` how many the chair named before it. Absent for a version no chair edit produced (round 0).
+   * Without it a regression cannot be read back: nothing else records what a round was trying to fix.
+   */
+  changes?: { requested: number; applied: Issue[] };
 }
 
 export interface Finalisation {
@@ -128,6 +134,15 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
         writeFile(join(base, "open-issues.json"), json(v.openIssues)),
         ...v.critiques.map((c) => writeFile(join(base, "critiques", `${c.critic}.json`), json(c))),
         ...(v.parent != null ? [writeFile(join(base, "parent.txt"), v.parent)] : []),
+        ...(v.changes
+          ? [writeFile(join(base, "changes.json"), json({
+              requested: v.changes.requested,
+              applied: v.changes.applied.map((i) => ({
+                id: i.id, severity: i.severity, effort: i.effort, claim: i.claim, fix: i.fix,
+                selector: i.evidence.selector,
+              })),
+            }))]
+          : []),
       ]);
       versions.push({ version, composite: v.composite, gatePass: v.gatePass });
       return version;

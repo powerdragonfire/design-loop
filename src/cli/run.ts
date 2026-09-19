@@ -101,6 +101,9 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   const loop = async (): Promise<{ stop: StopReason; best: string }> => {
     let prompt = buildFirstPrompt(contract, screen);
     let baseHandle: Screen | null = null;
+    // The chair changes `prompt` was built to make; recorded on the version that prompt produces, so a
+    // regression can be read back against what the round was trying to fix. Round 0 has none.
+    let changes: { requested: number; applied: Issue[] } | undefined;
     for (let n = 0; ; n++) {
       const version = `v${String(n).padStart(2, "0")}`;
       const handle: Screen = baseHandle ? await baseHandle.edit(prompt) : await generator.generate(prompt);
@@ -143,7 +146,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       const verdict = gate(scored, det.measurementsPass, carried);
 
       const written = await run.writeVersion({
-        index: n, png, html, doc, critiques: scored, composite: score, gatePass: verdict.pass, prompt, openIssues: open, parent,
+        index: n, png, html, doc, critiques: scored, composite: score, gatePass: verdict.pass, prompt, openIssues: open, parent, changes,
       });
       rounds.push({ version: written, composite: score, gatePass: verdict.pass });
       records.set(written, { png, doc, critiques: scored, open, composite: score, prompt, handle });
@@ -178,7 +181,11 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       } catch {
         next = await askChair(chairInput);
       }
+      if (next.requested > next.changes.length) {
+        log?.(`chair returned ${next.requested} changes; keeping the top ${next.changes.length}`);
+      }
       prompt = next.prompt;
+      changes = { requested: next.requested, applied: next.changes };
       // The next version is an edit of `base`, so the next round's state describes `base`, not a regressed `last`.
       parent = next.buildFrom ?? written;
       const base = records.get(parent)!;

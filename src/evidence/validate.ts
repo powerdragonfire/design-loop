@@ -32,9 +32,10 @@ export function validateEvidence(
 // Position (x, y) is deliberately excluded: an unrelated edit elsewhere shifts every
 // element below it, which would verify any claim about an untouched element. Size
 // still catches an enlarged touch target; style (incl. effectiveBackground) catches
-// colour fixes.
+// colour fixes; the node's OWN text catches a copy fix, which changes neither
+// (spec §7: the element's digest changed, and the digest line carries its text).
 const fingerprint = (n: MeasuredNode): string =>
-  JSON.stringify(n.style) + JSON.stringify([n.bbox.w, n.bbox.h]);
+  JSON.stringify(n.style) + JSON.stringify([n.bbox.w, n.bbox.h]) + JSON.stringify(n.text);
 
 function bySelector(doc: MeasuredDoc): Map<string, MeasuredNode> {
   return new Map(doc.nodes.map((n) => [n.selector, n]));
@@ -43,10 +44,15 @@ function bySelector(doc: MeasuredDoc): Map<string, MeasuredNode> {
 // A claimed resolution is never trusted on its own. It is verified only when a
 // previous document exists, the id was raised in the previous round, no critique in
 // this round raises it again (a re-raised issue is still open), and the cited
-// element's style or size differs between rounds. An element present in only one
-// document was added or removed, which counts as changed; one absent from both gives
+// element's style, size or own text differs between rounds. An element present in only
+// one document was added or removed, which counts as changed; one absent from both gives
 // nothing to observe, so it does not. The critic's own `verified` list is discarded
 // and recomputed, and `claimed` is left untouched.
+//
+// A `det-` id is never verifiable here, whatever a model claims: a deterministic issue
+// re-verifies only by re-running its check, which the loop does every round (spec §7).
+// Without this an accessibility critic, which is shown the measurements, could close a
+// still-failing measured blocker by claiming it after any unrelated edit to the element.
 export function promoteResolutions(
   critiques: Critique[],
   prev: MeasuredDoc | null,
@@ -73,6 +79,7 @@ export function promoteResolutions(
     const verified = [
       ...new Set(
         c.resolved.claimed.filter((id) => {
+          if (id.startsWith("det-")) return false;
           const selector = selectorOf.get(id);
           return selector !== undefined && !reRaised.has(id) && changed(selector);
         }),

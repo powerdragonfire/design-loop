@@ -70,6 +70,29 @@ describe("buildReport", () => {
     expect(section(h, "v01")).toContain("PROMPT-1");
   });
 
+  it("shows which issues an edit targeted, and says so when the chair asked for more than it got", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    await run.writeVersion(v(0, 70));
+    await run.writeVersion({ ...v(1, 85), parent: "v00", changes: { requested: 5, applied: [issue("typography-001", "shrink the hero")] } });
+    await run.finalise(fin());
+    const h = await page(run);
+    expect(section(h, "v01")).toMatch(/This edit targeted/i);
+    expect(section(h, "v01")).toContain("typography-001");
+    expect(section(h, "v01")).toContain("shrink the hero");
+    expect(section(h, "v01")).toContain("The chair asked for 5 changes");
+    expect(section(h, "v00")).not.toMatch(/This edit targeted/i);
+  });
+
+  it("escapes an untrusted claim in the targeted-changes list too", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    await run.writeVersion(v(0, 70));
+    await run.writeVersion({ ...v(1, 85), parent: "v00", changes: { requested: 1, applied: [issue("typography-001", "<img src=x onerror=alert(1)>")] } });
+    await run.finalise(fin());
+    const h = await page(run);
+    expect(h).not.toContain("<img src=x");
+    expect(h).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+
   it("warns when a critic was dropped, with its cause", async () => {
     const h = await page(await seed({ fin: { degradations: [{ version: "v01", critic: "feasibility", error: "HTTP 400 boom" }] } }));
     expect(h).toMatch(/dropped/i);

@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { loadContract } from "../contract/load.js";
 import { measure } from "../measure/measure.js";
@@ -6,6 +6,7 @@ import { deterministicCritique } from "../critics/deterministic.js";
 import { distill } from "../distill/distill.js";
 import { runCommittee, type CriticInput, type LlmClient } from "../critics/llm.js";
 import { composite, renormalise } from "../scoring/score.js";
+import { writeAtomic } from "../store/store.js";
 import { costUsd } from "./pricing.js";
 import type { Config, Contract, CriticName, Usage } from "../types.js";
 
@@ -65,7 +66,7 @@ async function readReference(designDir: string): Promise<ReferenceScreen[]> {
 async function writeEvidence(designDir: string, name: string, body: unknown): Promise<void> {
   const dir = join(designDir, ".design-loop");
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, name), JSON.stringify(body, null, 2) + "\n");
+  await writeAtomic(join(dir, name), JSON.stringify(body, null, 2) + "\n");
 }
 
 // Fail on an unpriced model before any spend, as a run does; a client that reports no usage needs no price.
@@ -78,12 +79,13 @@ function pricedTotal(cfg: Config, llm: LlmClient, total: Usage): number | null {
 }
 
 const mean = (xs: number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length;
-const populationVariance = (xs: number[]): number => {
+// Sample variance (n - 1): the population form understates the noise floor by sqrt((n-1)/n), the unsafe direction.
+const sampleVariance = (xs: number[]): number => {
   const m = mean(xs);
-  return mean(xs.map((x) => (x - m) ** 2));
+  return xs.reduce((sum, x) => sum + (x - m) ** 2, 0) / (xs.length - 1);
 };
 // sqrt of the mean of the per-screen variances: noise WITHIN a screen, never the spread between screens.
-const withinScreenStd = (perScreen: number[][]): number => Math.sqrt(mean(perScreen.map(populationVariance)));
+const withinScreenStd = (perScreen: number[][]): number => Math.sqrt(mean(perScreen.map(sampleVariance)));
 
 /**
  * Measure the composite's noise floor (sigma): re-run the whole committee `repeats` times over each
@@ -128,7 +130,13 @@ export async function calibrate(opts: {
       if (committee.critiques.length === 0) {
         throw new Error(`committee unavailable: ${committee.failures.map((f) => `${f.critic}: ${f.error}`).join("; ")}`);
       }
-      for (const f of committee.failures) log?.(`${screen} repeat ${r + 1}: ${f.critic} dropped: ${f.error}`);
+      // A repeat scored on fewer critics is rescaled by renormalise(), a systematic shift that would inflate sigma,
+      // and every later run trusts the written value. Nothing is written yet, so refusing here loses nothing.
+      if (committee.failures.length > 0) {
+        throw new Error(
+          `calibration aborted: ${screen}, repeat ${r + 1}: ${committee.failures.map((f) => `${f.critic}: ${f.error}`).join("; ")}`,
+        );
+      }
       // The deterministic critique is the tokenConformance dimension, exactly as in a run.
       const scored = [...committee.critiques, det.critique];
       scores.push(composite(scored, renormalise(cfg.weights, scored.map((c) => c.critic))));
@@ -140,12 +148,8 @@ export async function calibrate(opts: {
   }
 
   const sigma = withinScreenStd(composites);
-  // A critic that was dropped in some repeat has fewer samples on that screen; a lone sample has no spread.
   const perCritic: Record<string, number> = {};
-  for (const [critic, perScreen] of raw) {
-    const usable = perScreen.filter((s) => s.length >= 2);
-    if (usable.length > 0) perCritic[critic] = withinScreenStd(usable);
-  }
+  for (const [critic, perScreen] of raw) perCritic[critic] = withinScreenStd(perScreen);
   const screens = reference.map((s) => s.screen);
 
   await writeEvidence(designDir, "calibration.json", {
@@ -161,7 +165,7 @@ export async function calibrate(opts: {
   const configPath = join(designDir, "config.json");
   const rawConfig = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
   rawConfig.sigma = sigma;
-  await writeFile(configPath, JSON.stringify(rawConfig, null, 2) + "\n");
+  await writeAtomic(configPath, JSON.stringify(rawConfig, null, 2) + "\n");
 
   return { sigma, perCritic, repeats, screens, usd: pricedTotal(cfg, llm, usage) };
 }

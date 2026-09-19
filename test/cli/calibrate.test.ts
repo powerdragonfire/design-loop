@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, cpSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, cpSync, readFileSync, existsSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { calibrate, abDistiller } from "../../src/cli/calibrate.js";
@@ -31,16 +31,17 @@ describe("calibrate", () => {
     expect(out.sigma).toBeCloseTo(0, 9);
   });
 
-  it("measures repeat-to-repeat noise within a screen", async () => {
-    // each critic's score alternates 70/90 across repeats: std 10; the four LLM critics carry
-    // weight 0.8 and the deterministic dimension is constant, so the composite's std is 8
-    const out = await calibrate({ designDir: dir, llm: llmOf({ a: 80, b: 80, c: 80 }, [-10, 10]), repeats: 4 });
+  it("measures repeat-to-repeat noise within a screen, with the unbiased (n-1) estimator", async () => {
+    // each critic scores 70, 80, 90 across three repeats: SAMPLE std 10 (the population form
+    // would give 8.16 and understate the noise floor by 18%); the four LLM critics carry weight
+    // 0.8 and the deterministic dimension is constant, so the composite's std is 8
+    const out = await calibrate({ designDir: dir, llm: llmOf({ a: 80, b: 80, c: 80 }, [-10, 0, 10]), repeats: 3 });
     expect(out.sigma).toBeCloseTo(8, 6);
     expect(out.perCritic.typography).toBeCloseTo(10, 6);
   });
 
   it("does not fold the difference BETWEEN screens into sigma", async () => {
-    const out = await calibrate({ designDir: dir, llm: llmOf(BASE, [-10, 10]), repeats: 4 });
+    const out = await calibrate({ designDir: dir, llm: llmOf(BASE, [-10, 0, 10]), repeats: 3 });
     expect(out.sigma).toBeCloseTo(8, 6);
   });
 
@@ -53,14 +54,32 @@ describe("calibrate", () => {
     await expect(calibrate({ designDir: dir, llm: llmOf(BASE), repeats: 2 })).rejects.toThrow(/reference/);
   });
 
-  it("writes sigma into config.json and the evidence into calibration.json", async () => {
-    const out = await calibrate({ designDir: dir, llm: llmOf({ a: 80, b: 80, c: 80 }, [-10, 10]), repeats: 4 });
+  it("writes sigma into config.json and the evidence into calibration.json, leaving no temp files", async () => {
+    const out = await calibrate({ designDir: dir, llm: llmOf({ a: 80, b: 80, c: 80 }, [-10, 0, 10]), repeats: 3 });
     expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).sigma).toBeCloseTo(out.sigma, 9);
+    expect(readdirSync(join(dir, ".design-loop")).sort()).toEqual(["calibration.json"]);
+    expect(readdirSync(dir).filter(f => f.includes(".tmp"))).toEqual([]);
     const cal = JSON.parse(readFileSync(join(dir, ".design-loop", "calibration.json"), "utf8"));
-    expect(cal).toMatchObject({ repeats: 4, screens: ["a", "b", "c"] });
+    expect(cal).toMatchObject({ repeats: 3, screens: ["a", "b", "c"] });
     expect(cal.sigma).toBeCloseTo(out.sigma, 9);
     expect(cal.criticModel).toBe("claude-sonnet-5");
     expect(Object.keys(cal.weights)).toContain("typography");
+  });
+
+  it("refuses to calibrate when any critic is dropped in any repeat, and writes nothing", async () => {
+    // a repeat scored on fewer critics is rescaled by renormalise(), a systematic shift that
+    // would inflate sigma, and every later run trusts the written value
+    const before = readFileSync(join(dir, "config.json"), "utf8");
+    let n = 0;
+    const flaky: LlmClient = {
+      critique: async (critic, input) => {
+        if (critic === "feasibility" && ++n === 2) throw Object.assign(new Error("boom"), { status: 400 });
+        return { critic, score: 80, issues: [], resolved: { claimed: [], verified: [] } };
+      },
+    };
+    await expect(calibrate({ designDir: dir, llm: flaky, repeats: 3 })).rejects.toThrow(/calibration aborted.*feasibility.*boom/s);
+    expect(readFileSync(join(dir, "config.json"), "utf8")).toBe(before);
+    expect(existsSync(join(dir, ".design-loop", "calibration.json"))).toBe(false);
   });
 
   it("prices the run from the client's token usage", async () => {

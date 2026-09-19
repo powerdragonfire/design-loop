@@ -123,6 +123,10 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       );
       addUsage(criticUsage, llm.takeUsage?.());
       for (const f of committee.failures) degradations.push({ version, critic: f.critic, error: f.error });
+      // The deterministic critique alone is not a review: without one LLM critic the round is not scored (spec §14).
+      if (committee.critiques.length === 0) {
+        throw new Error(`committee unavailable: ${committee.failures.map((f) => `${f.critic}: ${f.error}`).join("; ")}`);
+      }
 
       const validated = validateEvidence(committee.critiques, doc);
       for (const [critic, rate] of Object.entries(validated.hallucinationRate) as [CriticName, number][]) {

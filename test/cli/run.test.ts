@@ -208,6 +208,15 @@ describe("runScreen", () => {
     expect(existsSync(join(runDir(dir), "manifest.json"))).toBe(false);
   });
 
+  it("aborts rather than scoring a round when every LLM critic is unavailable", async () => {
+    const dir = setup(); const gen = new FakeGenerator([shot(48)]);
+    const denied = Object.assign(new Error("invalid x-api-key"), { status: 401 });
+    // The deterministic critique alone would pass this screen's gate; no committee ever reviewed it.
+    await expect(run(dir, gen, llmOf([90], () => denied).llm, chairOf().client))
+      .rejects.toThrow(/committee unavailable.*typography: invalid x-api-key/);
+    expect(existsSync(join(runDir(dir), "manifest.json"))).toBe(false);
+  });
+
   it("retries a failing chair once and carries on", async () => {
     const dir = setup(); const c = chairOf(1);
     const out = await run(dir, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 80]).llm, c.client);

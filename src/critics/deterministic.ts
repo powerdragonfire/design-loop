@@ -123,8 +123,8 @@ const px = (s: string | undefined): number => parseFloat(s ?? "");
 const isInteractive = (n: MeasuredNode): boolean =>
   ["button", "a", "input", "select"].includes(n.tag) || n.role === "button";
 
-function contrastIssues(nodes: MeasuredNode[]): Omit<Issue, "id">[] {
-  const out: Omit<Issue, "id">[] = [];
+function contrastIssues(nodes: MeasuredNode[]): Issue[] {
+  const out: Issue[] = [];
   for (const n of nodes) {
     if (!n.text.trim()) continue;
     const fg = n.style["color"] ?? "";
@@ -138,6 +138,7 @@ function contrastIssues(nodes: MeasuredNode[]): Omit<Issue, "id">[] {
     const ratio = contrastRatio(fg, bg);
     if (ratio >= min) continue;
     out.push({
+      id: `det-contrast-${n.selector}`,
       severity: "blocker",
       evidence: { selector: n.selector, observed: `${fg} on ${bg}, ${size}px/${weight}, ratio ${ratio.toFixed(2)}:1` },
       claim: `Text contrast ${ratio.toFixed(2)}:1 is below the WCAG AA minimum of ${min}:1`,
@@ -148,11 +149,12 @@ function contrastIssues(nodes: MeasuredNode[]): Omit<Issue, "id">[] {
   return out;
 }
 
-function tapIssues(nodes: MeasuredNode[]): Omit<Issue, "id">[] {
+function tapIssues(nodes: MeasuredNode[]): Issue[] {
   return nodes.filter(isInteractive).flatMap(n => {
     const { w, h } = n.bbox;
     if (w >= MIN_TAP && h >= MIN_TAP) return [];
     return [{
+      id: `det-tap-${n.selector}`,
       severity: "blocker" as const,
       evidence: { selector: n.selector, observed: `${Math.round(w)}x${Math.round(h)}px` },
       claim: `Tap target is ${Math.round(w)}x${Math.round(h)}px, below the ${MIN_TAP}x${MIN_TAP}px minimum`,
@@ -162,7 +164,7 @@ function tapIssues(nodes: MeasuredNode[]): Omit<Issue, "id">[] {
   });
 }
 
-function insetIssues(nodes: MeasuredNode[]): Omit<Issue, "id">[] {
+function insetIssues(nodes: MeasuredNode[]): Issue[] {
   const top = VIEWPORT.h - HOME_INDICATOR_INSET;
   return nodes.filter(isInteractive).flatMap(n => {
     const { y, h } = n.bbox;
@@ -170,6 +172,7 @@ function insetIssues(nodes: MeasuredNode[]): Omit<Issue, "id">[] {
     // Below-the-fold elements are not pinned to the bottom; wrappers are not interactive.
     if (!(y < VIEWPORT.h && y + h > top)) return [];
     return [{
+      id: `det-inset-${n.selector}`,
       severity: "blocker" as const,
       evidence: { selector: n.selector, observed: `y ${Math.round(y)}-${Math.round(y + h)}px, inset starts at ${top}px` },
       claim: `Interactive element overlaps the ${HOME_INDICATOR_INSET}px home indicator safe area`,
@@ -180,14 +183,15 @@ function insetIssues(nodes: MeasuredNode[]): Omit<Issue, "id">[] {
 }
 
 /** Returns the issues plus how many token literals were examined (for the score). */
-function tokenIssues(nodes: MeasuredNode[], tokens: Record<string, unknown>): { issues: Omit<Issue, "id">[]; total: number } {
+function tokenIssues(nodes: MeasuredNode[], tokens: Record<string, unknown>): { issues: Issue[]; total: number } {
   const allowed = allowedTokens(tokens);
-  const issues: Omit<Issue, "id">[] = [];
+  const issues: Issue[] = [];
   let total = 0;
   const examine = (n: MeasuredNode, prop: string, ok: boolean, value: string, hint: string): void => {
     total++;
     if (ok) return;
     issues.push({
+      id: `det-token-${prop}-${n.selector}`,
       severity: "blocker",
       evidence: { selector: n.selector, observed: `${prop}: ${value}` },
       claim: `${prop} ${value} is not a design token`,
@@ -207,8 +211,9 @@ function tokenIssues(nodes: MeasuredNode[], tokens: Record<string, unknown>): { 
         examine(n, prop, allowed.colors.has(colorKey(c)), value, "Use a colour from the tokens file");
       }
     }
+    // Like `color`, font size is inherited: only examine it where text is painted.
     const fontSize = dimension(n.style["fontSize"] ?? "");
-    if (allowed.fontSizes.size > 0 && fontSize) {
+    if (allowed.fontSizes.size > 0 && fontSize && n.text.trim()) {
       examine(n, "fontSize", allowed.fontSizes.has(fontSize), fontSize, "Use a size from the type scale in the tokens file");
     }
     const parts = (n.style["borderRadius"] ?? "").split(/[\s/]+/).filter(Boolean)
@@ -231,14 +236,14 @@ export function deterministicCritique(
   tokens: Record<string, unknown>,
 ): { critique: Critique; measurementsPass: boolean } {
   const token = tokenIssues(doc.nodes, tokens);
-  const groups: [string, Omit<Issue, "id">[]][] = [
-    ["contrast", contrastIssues(doc.nodes)],
-    ["tap", tapIssues(doc.nodes)],
-    ["token", token.issues],
-    ["inset", insetIssues(doc.nodes)],
+  // Ids are content-derived (check + selector), so they survive edits to other elements;
+  // Task 4 tracks issues across rounds by id. Order matters to callers: contrast, tap, token, inset.
+  const issues: Issue[] = [
+    ...contrastIssues(doc.nodes),
+    ...tapIssues(doc.nodes),
+    ...token.issues,
+    ...insetIssues(doc.nodes),
   ];
-  const issues: Issue[] = groups.flatMap(([check, list]) =>
-    list.map((i, idx) => ({ id: `det-${check}-${idx + 1}`, ...i })));
   const score = token.total === 0 ? 100 : (100 * (token.total - token.issues.length)) / token.total;
   return {
     critique: { critic: "tokenConformance", score, issues, resolved: { claimed: [], verified: [] } },

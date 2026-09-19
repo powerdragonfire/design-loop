@@ -92,7 +92,7 @@ describe("deterministicCritique token conformance", () => {
     // color conforms (accent); backgroundColor is off-token -> 1 of 2 literals conforming
     const d = doc(node({ text: "hi", style: { backgroundColor: "rgb(1, 2, 3)" } }));
     const { critique } = deterministicCritique(d, tokens);
-    expect(critique.issues.map(i => i.id)).toEqual(["det-token-1"]);
+    expect(critique.issues.map(i => i.id)).toEqual(["det-token-backgroundColor-#n"]);
     expect(critique.issues[0]!.evidence.selector).toBe("#n");
     expect(critique.score).toBe(50);
   });
@@ -104,7 +104,7 @@ describe("deterministicCritique token conformance", () => {
     }));
     const { critique } = deterministicCritique(d, tokens);
     expect(critique.issues.map(i => i.id)).toEqual(
-      expect.arrayContaining(["det-contrast-1", "det-tap-1", "det-inset-1"]));
+      expect.arrayContaining(["det-contrast-#n", "det-tap-#n", "det-inset-#n"]));
     expect(critique.score).toBe(100);
   });
 
@@ -115,9 +115,9 @@ describe("deterministicCritique token conformance", () => {
 
   it("checks fontSize and borderRadius when tokens define them, ignoring 0px radii", () => {
     const full = { ...tokens, fontSize: { body: "16px", title: "1.5rem" }, radius: { md: "8px" } };
-    const ok = doc(node({ style: { fontSize: "24px", borderRadius: "8px" } }));
+    const ok = doc(node({ text: "x", style: { fontSize: "24px", borderRadius: "8px" } }));
     expect(deterministicCritique(ok, full).critique.issues).toEqual([]);
-    const bad = doc(node({ style: { fontSize: "13px", borderRadius: "7px" } }));
+    const bad = doc(node({ text: "x", style: { fontSize: "13px", borderRadius: "7px" } }));
     expect(deterministicCritique(bad, full).critique.issues).toHaveLength(2);
     const square = doc(node({ style: { borderRadius: "0px" } }));
     expect(deterministicCritique(square, full).critique.score).toBe(100);
@@ -136,7 +136,7 @@ describe("deterministicCritique token conformance", () => {
     const large = deterministicCritique(doc(node({ text: "a", style: { ...style, fontSize: "24px" } })), { spacing: {} });
     expect(contrastRatio(style.color, style.effectiveBackground)).toBeGreaterThan(3);
     expect(contrastRatio(style.color, style.effectiveBackground)).toBeLessThan(4.5);
-    expect(small.critique.issues.map(i => i.id)).toEqual(["det-contrast-1"]);
+    expect(small.critique.issues.map(i => i.id)).toEqual(["det-contrast-#n"]);
     expect(large.critique.issues).toEqual([]);
   });
 });
@@ -147,5 +147,42 @@ describe("deterministicCritique token scoping", () => {
     const { critique } = deterministicCritique(d, tokens);
     expect(critique.issues).toEqual([]);
     expect(critique.score).toBe(100);
+  });
+});
+
+describe("deterministicCritique fontSize scoping", () => {
+  it("does not examine or count the inherited font size of text-less wrappers", () => {
+    const scale = { ...tokens, fontSize: { sm: "12px", md: "14px", lg: "18px" } };
+    const text = node({ selector: "#t", text: "hi", style: { fontSize: "14px" } });
+    const wrapper = node({ selector: "#w", text: "", style: { fontSize: "16px" } }); // ambient 16px, not on the scale
+    const { critique } = deterministicCritique(doc(wrapper, text), scale);
+    expect(critique.issues).toEqual([]);
+    expect(critique.score).toBe(100);
+  });
+
+  it("still flags an off-scale font size on a node with own text", () => {
+    const scale = { ...tokens, fontSize: { sm: "12px", md: "14px", lg: "18px" } };
+    const { critique } = deterministicCritique(doc(node({ text: "hi", style: { fontSize: "16px" } })), scale);
+    expect(critique.issues.map(i => i.id)).toEqual(["det-token-fontSize-#n"]);
+    expect(critique.score).toBe(50); // color conforms, backgroundColor is transparent (skipped), fontSize off
+  });
+});
+
+describe("deterministicCritique issue ids", () => {
+  const btn = (id: string, size: number) =>
+    `<button id="${id}" style="display:block;width:${size}px;height:${size}px;color:#0B0B0F;background:#FF7A1A">x</button>`;
+  const ids = async (page: string) =>
+    deterministicCritique(await measure(`<body style="margin:0;background:#0B0B0F">${page}</body>`), tokens)
+      .critique.issues.map(i => i.id);
+
+  it("derives ids from the check and selector", async () => {
+    expect(await ids(btn("a", 30))).toEqual(["det-tap-#a"]);
+  });
+
+  it("keeps a defect's id when an unrelated element is fixed", async () => {
+    const before = await ids(btn("a", 30) + btn("b", 30));
+    const after = await ids(btn("a", 44) + btn("b", 30));
+    expect(before).toEqual(["det-tap-#a", "det-tap-#b"]);
+    expect(after).toEqual(["det-tap-#b"]);
   });
 });

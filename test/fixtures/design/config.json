@@ -1,0 +1,18 @@
+{
+  "sigma": 3.0,
+  "maxRounds": 5,
+  "convergenceSigmas": 1.0,
+  "convergenceRounds": 2,
+  "models": {
+    "critic": "claude-sonnet-5",
+    "chair": "claude-opus-5"
+  },
+  "weights": {
+    "typography": 0.25,
+    "behavioural": 0.20,
+    "accessibility": 0.20,
+    "tokenConformance": 0.20,
+    "feasibility": 0.15
+  },
+  "batchMode": false
+}

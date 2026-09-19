@@ -1,0 +1,28 @@
+{
+  "name": "design-loop",
+  "version": "1.0.0",
+  "description": "Generate screen designs with Google Stitch, critique them with a five-dimension committee, iterate until a measured stopping rule fires.",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@10.17.1",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
+    "@google/stitch-sdk": "^0.3.5",
+    "playwright": "^1.63.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  },
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  }
+}

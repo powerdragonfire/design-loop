@@ -8,8 +8,9 @@ import { distill } from "../distill/distill.js";
 import { runCommittee, type LlmClient } from "../critics/llm.js";
 import { chair, type ChairClient } from "../chair/chair.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
-import { readQuota } from "../stitch/quota.js";
+import { MONTHLY_LIMIT, readQuota } from "../stitch/quota.js";
 import { openRun, type Degradation } from "../store/store.js";
+import { readCalibration, type Calibration } from "./calibration.js";
 import { costUsd } from "./pricing.js";
 import { groupTokenIssues } from "./group.js";
 import { buildFirstPrompt } from "./prompt.js";
@@ -73,8 +74,12 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       `Stitch quota too low: ${quota.remaining} generations left, a run may need ${cfg.maxRounds + 1} — resets ${resets}`,
     );
   }
+  if (quota.warn) log?.(`Stitch quota: ${quota.used}/${MONTHLY_LIMIT} used this month`);
   // loadContract has already refused a null sigma.
   const sigma = cfg.sigma!;
+  // A stale calibration is the quiet failure: sigma decides when the run stops, so a run judged against
+  // a noise floor measured for another model, other weights or another number says so, loudly (spec §16).
+  const calibration = await readCalibration(designDir, cfg, sigma, log);
   const run = await openRun(designDir, screen, date);
 
   const rounds: RoundRecord[] = [];
@@ -232,6 +237,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     hallucinationRate: Object.fromEntries([...hallucination].map(([critic, t]) => [critic, t.sum / t.n])),
     degradations,
     sigma,
+    calibration,
   });
   return { stopReason, versions: rounds.length, best: stoppedBest ?? committeeRank[0]!, runDir: run.dir, abortReason };
 }

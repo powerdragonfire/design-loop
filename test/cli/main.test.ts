@@ -94,6 +94,31 @@ describe("main", () => {
     expect(d.buildReport).toHaveBeenCalled();
   });
 
+  it("prints the summary before the report, so the run's outcome survives a failing report", async () => {
+    const c = capture();
+    const d = deps({ buildReport: vi.fn(async () => { throw new Error("EACCES report.html"); }) });
+    expect(await main(["run", "home"], c.io, d)).toBe(0);
+    expect(c.out.join("\n")).toContain("pass");
+    expect(c.out.join("\n")).toContain("v01");
+    expect(c.err.join("\n")).toContain("Report failed: EACCES report.html");
+  });
+
+  it("keeps an aborted run's exit 3 even when the report fails as well", async () => {
+    const c = capture();
+    const d = deps({
+      runScreen: vi.fn(async () => ({ ...RESULT, stopReason: "aborted" as const, abortReason: "quota" })),
+      buildReport: vi.fn(async () => { throw new Error("EACCES report.html"); }),
+    });
+    expect(await main(["run", "home"], c.io, d)).toBe(3);
+    expect(c.out.join("\n")).toContain("quota");
+  });
+
+  it("orders the run summary ahead of the report line", async () => {
+    const c = capture();
+    await main(["run", "home"], c.io, deps());
+    expect(c.out.findIndex(l => l.startsWith("Stop reason:"))).toBeLessThan(c.out.findIndex(l => l.startsWith("Report:")));
+  });
+
   it("prints only the message, not a stack, for an ordinary error", async () => {
     const c = capture();
     const d = deps({ runScreen: vi.fn(async () => { throw new Error("Stitch quota too low"); }) });

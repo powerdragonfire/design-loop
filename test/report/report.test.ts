@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openRun } from "../../src/store/store.js";
@@ -91,6 +91,18 @@ describe("buildReport", () => {
     const h = await page(run);
     expect(h).not.toContain("<img src=x");
     expect(h).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+
+  it("renders the complete versions and names an incomplete directory it skipped", async () => {
+    const run = await seed();
+    mkdirSync(join(run.dir, "v02"));
+    writeFileSync(join(run.dir, "v02", "screen.png"), "png");
+    const h = await page(run);
+    expect(h).toContain('data-version="v00"');
+    expect(h).toContain('data-version="v01"');
+    expect(h).not.toContain('data-version="v02"');
+    expect(h).toMatch(/incomplete version/i);
+    expect(h).toContain(join(run.dir, "v02"));
   });
 
   it("warns when a critic was dropped, with its cause", async () => {

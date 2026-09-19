@@ -88,10 +88,20 @@ describe("deterministicCritique token conformance", () => {
 
   it("accepts DTCG leaves and bare leaves, normalising 3, 6 and 8 digit hex", () => {
     const dtcg = { color: { $type: "color", accent: { $value: "#f71" }, bg: { $value: "#0B0B0FFF" } } };
-    const d = doc(node({ text: "x", style: { color: "rgb(255, 119, 17)", backgroundColor: "rgb(11, 11, 15)" } }));
+    // The off-token second node is what proves the $value leaves were READ: with no $value support the
+    // colour set is empty, nothing is examined, and an all-conforming document passes for the wrong reason.
+    const d = doc(
+      node({ text: "x", style: { color: "rgb(255, 119, 17)", backgroundColor: "rgb(11, 11, 15)" } }),
+      node({ selector: "#off", text: "x", style: { color: "rgb(250, 250, 250)", backgroundColor: "rgb(11, 11, 15)" } }),
+    );
     const { critique } = deterministicCritique(d, dtcg);
-    expect(critique.issues).toEqual([]);
-    expect(critique.score).toBe(100);
+    expect(critique.issues.map(i => i.id)).toEqual(["det-token-color-#off"]);
+    expect(critique.score).toBe(75);
+  });
+
+  it("skips an alias leaf rather than making `{base.radius}` the only allowed radius", () => {
+    const aliased = { ...tokens, radius: { md: "{base.radius}" } };
+    expect(deterministicCritique(doc(node({ style: { borderRadius: "8px" } })), aliased).critique.issues).toEqual([]);
   });
 
   it("flags an off-token colour with a det-token id and scores conforming/total", () => {

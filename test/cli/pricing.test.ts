@@ -12,6 +12,11 @@ describe("costUsd", () => {
   it("prices Opus 5 at $5 in, $25 out, $0.50 cached per MTok", () => {
     expect(costUsd("claude-opus-5", u(1_000_000, 1_000_000, 1_000_000))).toBeCloseTo(30.5, 9);
   });
+  it("prices Haiku 4.5 at $1 in, $5 out, $0.10 cached per MTok", () => {
+    expect(costUsd("claude-haiku-4-5", u(1_000_000, 0, 0))).toBeCloseTo(1, 9);
+    expect(costUsd("claude-haiku-4-5", u(0, 1_000_000, 0))).toBeCloseTo(5, 9);
+    expect(costUsd("claude-haiku-4-5", u(0, 0, 1_000_000))).toBeCloseTo(0.1, 9);
+  });
   it("throws for a model with no price rather than guessing", () => {
     expect(() => costUsd("claude-nope", u(1, 1, 1))).toThrow(/no price for model claude-nope/);
   });

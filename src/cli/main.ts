@@ -137,12 +137,17 @@ async function runCommand(d: Deps, io: Io, designDir: string, screen: string, da
   const result = await d.runScreen({
     designDir, screen, date, generator, llm: d.makeLlm(), chairClient: d.makeChair(), log: (line) => io.out(line),
   });
-  const report = await d.buildReport(result.runDir);
+  // The summary first: on a PAID run a failing report must not cost the operator the stop reason, the
+  // versions, what was spent, or the exit-3 signal a script reads.
   const spend = await readSpend(result.runDir);
   io.out(`Stop reason: ${result.stopReason}${result.abortReason ? ` (${result.abortReason})` : ""}`);
   io.out(`Versions: ${result.versions}, best: ${result.best}`);
   if (spend?.usd !== undefined) io.out(`Spend: $${spend.usd.toFixed(2)}, ${spend.stitchGenerations ?? 0} Stitch generations`);
-  io.out(`Report: ${report}`);
+  try {
+    io.out(`Report: ${await d.buildReport(result.runDir)}`);
+  } catch (err) {
+    io.err(`Report failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   io.out(`Review with: design-loop review ${result.runDir}`);
   return result.stopReason === "aborted" ? 3 : 0;
 }

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mkdirSync } from "node:fs";
 import { runScreen } from "../../src/cli/run.js";
 import { FakeGenerator } from "../../src/stitch/adapter.js";
 import { reserve, MONTHLY_LIMIT } from "../../src/stitch/quota.js";
@@ -326,5 +327,61 @@ describe("runScreen", () => {
     expect(seen.map(i => i.id)).toContain("det-token-group-color-1");
     expect(seen.map(i => i.id)).not.toContain("det-token-color-#t1");
     expect(seen.find(i => i.id === "det-token-group-color-1")!.claim).toContain("#t1, #t2");
+  });
+
+  const CALIBRATION = {
+    sigma: 3, perCritic: {}, repeats: 5, screens: ["a"],
+    criticModel: "claude-sonnet-5",
+    weights: { typography: 0.25, behavioural: 0.20, accessibility: 0.20, tokenConformance: 0.20, feasibility: 0.15 },
+    measuredAt: "2026-09-17T09:00:00.000Z",
+  };
+  const writeCalibration = (d: string, over: object | string) => {
+    mkdirSync(join(d, ".design-loop"), { recursive: true });
+    writeFileSync(join(d, ".design-loop", "calibration.json"),
+      typeof over === "string" ? over : JSON.stringify({ ...CALIBRATION, ...over }));
+  };
+  const logged = async (d: string, over: object | string | null) => {
+    if (over !== null) writeCalibration(d, over);
+    const lines: string[] = [];
+    await run(d, new FakeGenerator([shot(48)]), llmOf([90]).llm, chairOf().client, { log: (l: string) => lines.push(l) });
+    return lines.join("\n");
+  };
+
+  it("says when the Stitch quota is past its warning line", async () => {
+    const dir = setup();
+    await reserve(dir, 450);
+    expect(await logged(dir, {})).toContain(`Stitch quota: 450/${MONTHLY_LIMIT} used this month`);
+    expect(await logged(setup(), {})).not.toMatch(/Stitch quota:/);
+  });
+
+  it("references the calibration in the manifest and says nothing when it still matches the config", async () => {
+    const dir = setup();
+    const text = await logged(dir, {});
+    expect(manifest(dir).calibration).toEqual({
+      sigma: 3, criticModel: "claude-sonnet-5", weights: CALIBRATION.weights, measuredAt: CALIBRATION.measuredAt,
+    });
+    expect(text).not.toMatch(/WARNING/);
+    expect(text).not.toMatch(/by hand/);
+  });
+
+  it("warns when the critic model, the weights or sigma have drifted from the calibration", async () => {
+    expect(await logged(setup(), { criticModel: "claude-haiku-4-5" }))
+      .toMatch(/WARNING.*claude-haiku-4-5.*claude-sonnet-5|WARNING.*critic/i);
+    expect(await logged(setup(), { weights: { ...CALIBRATION.weights, typography: 0.9 } })).toMatch(/WARNING.*weights/i);
+    expect(await logged(setup(), { sigma: 1.5 })).toMatch(/WARNING.*sigma/i);
+  });
+
+  it("says sigma was set by hand when there is no calibration at all, and records none", async () => {
+    const dir = setup();
+    expect(await logged(dir, null)).toMatch(/sigma 3 was set by hand; run `design-loop calibrate`/);
+    expect(manifest(dir).calibration).toBeNull();
+  });
+
+  it("warns, rather than crashing, when the calibration file is corrupt", async () => {
+    const dir = setup();
+    const text = await logged(dir, "{ not json");
+    expect(text).toMatch(/WARNING.*calibration\.json/i);
+    expect(manifest(dir).calibration).toBeNull();
+    expect(manifest(dir).stopReason).toBe("pass");
   });
 }, 240_000);

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openRun, openExistingRun } from "../../src/store/store.js";
@@ -111,6 +111,26 @@ describe("store", () => {
     expect(m.versions).toEqual([{ version: "v00", composite: 70, gatePass: false }, { version: "v01", composite: 85, gatePass: true }]);
   });
 
+  it("references in the manifest the calibration the run's noise floor came from", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    await run.writeVersion(v(0, 70));
+    const calibration = {
+      sigma: 3, criticModel: "claude-sonnet-5",
+      weights: { typography: 0.25 }, measuredAt: "2026-09-17T09:00:00.000Z",
+    };
+    await run.finalise(fin({ calibration }));
+    expect(read(join(dir, "runs", R, "manifest.json")).calibration).toEqual(calibration);
+  });
+
+  it("records that no calibration was found, rather than leaving the field out", async () => {
+    const run = await openRun(dir, "home", "2026-09-18");
+    await run.writeVersion(v(0, 70));
+    await run.finalise(fin({ calibration: null }));
+    const m = read(join(dir, "runs", R, "manifest.json"));
+    expect(Object.hasOwn(m, "calibration")).toBe(true);
+    expect(m.calibration).toBeNull();
+  });
+
   it("records agreement when the human picks the committee's top", async () => {
     const run = await openRun(dir, "home", "2026-09-18");
     await run.writeVersion(v(0, 70)); await run.writeVersion(v(1, 90));
@@ -187,6 +207,27 @@ describe("openExistingRun", () => {
     await (await openExistingRun(first.dir)).approve("v01");
     expect(existsSync(join(first.dir, "v00", "approved.json"))).toBe(false);
     expect(read(join(first.dir, "manifest.json")).humanPick).toBe("v01");
+  });
+
+  it("ignores a stray version directory when a manifest says which versions the run has", async () => {
+    const first = await openRun(dir, "home", "2026-09-18");
+    await first.writeVersion(v(0, 70)); await first.writeVersion(v(1, 90));
+    await first.finalise(fin({ committeeRank: ["v01", "v00"] }));
+    // What a crash mid-writeVersion, or a report built during a live run, leaves behind.
+    mkdirSync(join(first.dir, "v02"));
+    writeFileSync(join(first.dir, "v02", "screen.png"), "png");
+    const later = await openExistingRun(first.dir);
+    await later.approve("v01");
+    expect(read(join(first.dir, "manifest.json")).humanPick).toBe("v01");
+  });
+
+  it("skips a version with no composite.json when there is no manifest to trust", async () => {
+    const first = await openRun(dir, "home", "2026-09-18");
+    await first.writeVersion(v(0, 70));
+    mkdirSync(join(first.dir, "v01"));
+    const later = await openExistingRun(first.dir);
+    await later.finalise(fin({ committeeRank: ["v00"] }));
+    expect(read(join(first.dir, "manifest.json")).versions.map((s: { version: string }) => s.version)).toEqual(["v00"]);
   });
 
   it("refuses a directory that is not a run", async () => {

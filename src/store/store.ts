@@ -54,6 +54,12 @@ export interface Finalisation {
   degradations: Degradation[];
   /** The noise floor the run's stopping behaviour was judged against (spec §18). */
   sigma: number;
+  /**
+   * The calibration that sigma came from, so a later reader can tell whether this run's stopping rule rested
+   * on a measurement or on a hand-typed number (spec §18 step 3), and notice a stale one (spec §16 risk 2).
+   * `null` records that no calibration was found; it is never simply left out.
+   */
+  calibration?: { sigma: number; criticModel: string; weights: Record<string, number>; measuredAt: string } | null;
 }
 
 export interface Run {
@@ -166,6 +172,7 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
         hallucinationRate: m.hallucinationRate,
         degradations: m.degradations,
         sigma: m.sigma,
+        calibration: m.calibration ?? null,
       });
       await writeAtomic(manifestFile, json(next));
       manifest = next;
@@ -219,8 +226,11 @@ const parseFile = async <T>(file: string): Promise<T> => {
 };
 
 /**
- * Reopens a run written by an earlier process, so a person can approve it after reading the report. Versions come
- * from each `vNN/composite.json`; a `manifest.json` means the run was finalised, its absence that it was not.
+ * Reopens a run written by an earlier process, so a person can approve it after reading the report. A
+ * `manifest.json` means the run was finalised, and its `versions` list is then authoritative: a stray `vNN`
+ * beside it (a crash mid-writeVersion, or a live run being read) is ignored. Without one, versions come from
+ * each `vNN/composite.json`, and a directory that has none is skipped rather than making the whole run
+ * unopenable, so an aborted run's good versions can still be reviewed and approved.
  */
 export async function openExistingRun(runDir: string): Promise<Run> {
   let entries;
@@ -235,14 +245,6 @@ export async function openExistingRun(runDir: string): Promise<Run> {
   const names = entries.filter((e) => e.isDirectory() && /^v\d{2}$/.test(e.name)).map((e) => e.name).sort();
   if (names.length === 0) throw new Error(`no such run: ${runDir} holds no version directory`);
 
-  const versions: VersionSummary[] = [];
-  for (const version of names) {
-    const { composite, gatePass } = await parseFile<{ composite: number; gatePass: boolean }>(
-      join(runDir, version, "composite.json"),
-    );
-    versions.push({ version, composite, gatePass });
-  }
-
   let manifest: Manifest | null = null;
   try {
     manifest = await parseFile<Manifest>(join(runDir, "manifest.json"));
@@ -251,6 +253,27 @@ export async function openExistingRun(runDir: string): Promise<Run> {
   }
   if (manifest && !(Array.isArray(manifest.committeeRank) && manifest.committeeRank.length > 0)) {
     throw new Error(`${join(runDir, "manifest.json")} has no committeeRank`);
+  }
+
+  const listed = manifest?.versions;
+  const versions: VersionSummary[] = [];
+  if (Array.isArray(listed)) {
+    for (const entry of listed as Partial<VersionSummary>[]) {
+      if (typeof entry?.version === "string") {
+        versions.push({ version: entry.version, composite: Number(entry.composite), gatePass: Boolean(entry.gatePass) });
+      }
+    }
+  } else {
+    for (const version of names) {
+      let summary;
+      try {
+        summary = await parseFile<{ composite: number; gatePass: boolean }>(join(runDir, version, "composite.json"));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue; // written only in part
+        throw err;
+      }
+      versions.push({ version, composite: summary.composite, gatePass: summary.gatePass });
+    }
   }
 
   // Only an unfinalised run needs these, to write its manifest later. The `-N` collision suffix is

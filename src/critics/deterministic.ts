@@ -90,6 +90,10 @@ function allowedTokens(tokens: Record<string, unknown>): AllowedTokens {
   const out: AllowedTokens = { colors: new Set(), fontSizes: new Set(), radii: new Set() };
   const walk = (node: unknown, path: string[], type: string | undefined): void => {
     if (typeof node === "string" || typeof node === "number") {
+      // `{base.radius}` is a reference to another token, not a value a design may use. Tokens Studio
+      // exports these routinely; as a literal it made every real radius a violation. Resolving aliases
+      // is a later step — skipping one leaves its category unchecked for that value, which is safe.
+      if (typeof node === "string" && /^\{.*\}$/.test(node.trim())) return;
       const key = path.some(p => FONT_SIZE_KEY.test(p)) || type === "fontSize" ? "fontSizes" : null;
       const radius = path.some(p => RADIUS_KEY.test(p)) || type === "borderRadius";
       if (typeof node === "string") {

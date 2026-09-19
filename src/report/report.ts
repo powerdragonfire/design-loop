@@ -250,11 +250,25 @@ export async function buildReport(runDir: string): Promise<string> {
     .filter((e) => e.isDirectory() && /^v\d{2}$/.test(e.name))
     .map((e) => e.name)
     .sort();
-  const versions = await Promise.all(names.map((n) => readVersion(abs, n)));
+  // A vNN written only in part (a crash mid-writeVersion, or this run still going) must not cost the
+  // operator the report of every other version; it is named instead.
+  const skipped: string[] = [];
+  const loaded = await Promise.all(names.map(async (n) => {
+    try {
+      return await readVersion(abs, n);
+    } catch (err) {
+      if (!isMissing(err)) throw err;
+      skipped.push(join(abs, n));
+      return null;
+    }
+  }));
+  const versions = loaded.filter((v): v is VersionView => v !== null);
   const manifestFile = join(abs, "manifest.json");
   const manifestRaw = await readOptional(manifestFile);
   const manifest = manifestRaw === null ? null : parseJson<ManifestView>(manifestFile, manifestRaw);
 
+  const incomplete = skipped.length === 0 ? "" : `<div class="warn" role="alert"><strong>Incomplete version skipped.</strong> `
+    + `These directories hold no complete version and are not shown:<ul>${skipped.map((p) => `<li><code>${esc(p)}</code></li>`).join("")}</ul></div>`;
   const sections = versions.map((v, i) => {
     const prev = versions[i - 1] ?? null;
     const parent = v.parent ? (versions.find((p) => p.name === v.parent) ?? null) : prev;
@@ -268,7 +282,8 @@ export async function buildReport(runDir: string): Promise<string> {
 <title>Design review: ${esc(manifest?.screen ?? basename(abs))}</title>
 <style>${CSS}</style></head>
 <body><main>
-${header(manifest, names, abs)}
+${header(manifest, versions.map((v) => v.name), abs)}
+${incomplete}
 <div class="versions">
 ${sections.join("\n")}
 </div>

@@ -209,6 +209,17 @@ describe("runScreen", () => {
   });
 
   it("aborts rather than scoring a round when every LLM critic is unavailable", async () => {
+    const dir = setup();
+    const auth = Object.assign(new Error("invalid x-api-key"), { status: 401 });
+    const hook: Hook = (_c, round) => (round >= 1 ? auth : undefined);
+    const out = await run(dir, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 80], hook).llm, chairOf().client);
+    expect(out.stopReason).toBe("aborted");
+    expect(out.versions).toBe(1);
+    expect(manifest(dir).abortReason).toMatch(/committee unavailable/);
+    expect(manifest(dir).abortReason).toContain("invalid x-api-key");
+  });
+
+  it("rethrows, writing no manifest, when every LLM critic is unavailable at round 0", async () => {
     const dir = setup(); const gen = new FakeGenerator([shot(48)]);
     const denied = Object.assign(new Error("invalid x-api-key"), { status: 401 });
     // The deterministic critique alone would pass this screen's gate; no committee ever reviewed it.

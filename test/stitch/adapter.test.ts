@@ -1,0 +1,151 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FakeGenerator, StitchGenerator } from "../../src/stitch/adapter.js";
+import { readQuota, reserve, MONTHLY_LIMIT } from "../../src/stitch/quota.js";
+
+describe("FakeGenerator", () => {
+  it("returns scripted screens in order", async () => {
+    const g = new FakeGenerator([
+      { html: "<p>a</p>", png: Buffer.from("a") },
+      { html: "<p>b</p>", png: Buffer.from("b") },
+    ]);
+    const s0 = await g.generate("go");
+    expect(await s0.getHtml()).toBe("<p>a</p>");
+    const s1 = await s0.edit("fix");
+    expect(await s1.getHtml()).toBe("<p>b</p>");
+  });
+
+  it("records every prompt it was given", async () => {
+    const g = new FakeGenerator([{ html: "x", png: Buffer.from("") }, { html: "y", png: Buffer.from("") }]);
+    await (await g.generate("first")).edit("second");
+    expect(g.prompts).toEqual(["first", "second"]);
+  });
+
+  it("throws when the script runs out, rather than repeating silently", async () => {
+    const g = new FakeGenerator([{ html: "x", png: Buffer.from("") }]);
+    await expect((await g.generate("a")).edit("b")).rejects.toThrow(/script exhausted/);
+  });
+});
+
+// The installed @google/stitch-sdk (0.3.5) returns DOWNLOAD URLs, not content:
+// Screen.getHtml() and Screen.getImage() both resolve to a URL string (or "" when
+// the response lacks one). StitchGenerator must therefore fetch both.
+describe("StitchGenerator", () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "dl-")); });
+
+  const sdkScreen = (over: Record<string, any> = {}): any => ({
+    id: "s1",
+    getHtml: async () => "https://x/html",
+    getImage: async () => "https://x/img",
+    edit: vi.fn(async () => sdkScreen({ id: "s2" })),
+    ...over,
+  });
+  const res = (body: Buffer | string, status = 200) => {
+    const buf = typeof body === "string" ? Buffer.from(body) : body;
+    return { ok: status >= 200 && status < 300, status, text: async () => buf.toString("utf8"),
+      arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) };
+  };
+  const okFetch = () => vi.fn(async (url: string) => (url.endsWith("html") ? res("<p>hi</p>") : res(PNG)));
+  const make = (project: any, extra: Record<string, any> = {}) => {
+    const sleeps: number[] = [];
+    const fetch = extra.fetch ?? okFetch();
+    const gen = new StitchGenerator({ project, quotaDir: dir, fetch, sleep: async (ms: number) => { sleeps.push(ms); }, ...extra });
+    return { gen, sleeps, fetch };
+  };
+
+  it("downloads the HTML and image URLs the SDK returns", async () => {
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()) });
+    const s = await gen.generate("go");
+    expect(await s.getHtml()).toBe("<p>hi</p>");
+    expect((await s.getImage()).equals(PNG)).toBe(true);
+  });
+
+  it("asks for a MOBILE screen, and passes the model id when configured", async () => {
+    const generate = vi.fn(async () => sdkScreen());
+    const a = make({ generate });
+    const s = await a.gen.generate("go");
+    expect(generate).toHaveBeenCalledWith("go", "MOBILE", undefined);
+    await s.edit("fix");
+    const b = make({ generate }, { modelId: "GEMINI_3_PRO" });
+    await b.gen.generate("go");
+    expect(generate).toHaveBeenLastCalledWith("go", "MOBILE", "GEMINI_3_PRO");
+  });
+
+  it("wraps the edited screen and reserves quota for it as well", async () => {
+    const inner = sdkScreen();
+    const { gen } = make({ generate: vi.fn(async () => inner) });
+    const s = await gen.generate("go");
+    const edited = await s.edit("fix");
+    expect(inner.edit).toHaveBeenCalledWith("fix", "MOBILE", undefined);
+    expect(await edited.getHtml()).toBe("<p>hi</p>");
+    expect((await readQuota(dir)).used).toBe(2);
+  });
+
+  it("reserves one generation before calling the SDK", async () => {
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()) });
+    await gen.generate("go");
+    expect((await readQuota(dir)).used).toBe(1);
+  });
+
+  it("never calls the SDK when the quota is exhausted", async () => {
+    const generate = vi.fn(async () => sdkScreen());
+    await reserve(dir, MONTHLY_LIMIT);
+    const { gen } = make({ generate });
+    await expect(gen.generate("go")).rejects.toThrow(/quota/i);
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("retries a failing call twice with 1s then 4s backoff, rethrows the last error, and reserves once", async () => {
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new Error("e1")).mockRejectedValueOnce(new Error("e2")).mockRejectedValueOnce(new Error("e3"));
+    const { gen, sleeps } = make({ generate });
+    await expect(gen.generate("go")).rejects.toThrow("e3");
+    expect(generate).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([1000, 4000]);
+    expect((await readQuota(dir)).used).toBe(1);
+  });
+
+  it("succeeds after one transient failure", async () => {
+    const generate = vi.fn().mockRejectedValueOnce(new Error("blip")).mockResolvedValueOnce(sdkScreen());
+    const { gen, sleeps } = make({ generate });
+    const s = await gen.generate("go");
+    expect(sleeps).toEqual([1000]);
+    expect(await s.getHtml()).toBe("<p>hi</p>");
+  });
+
+  it("throws when the SDK returns an empty download URL", async () => {
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen({ getHtml: async () => "" })) });
+    const s = await gen.generate("go");
+    await expect(s.getHtml()).rejects.toThrow(/empty/i);
+  });
+
+  it("throws when the downloaded image is not a PNG (the critics send image/png)", async () => {
+    const fetch = vi.fn(async (url: string) => (url.endsWith("html") ? res("<p/>") : res(JPEG)));
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });
+    const s = await gen.generate("go");
+    await expect(s.getImage()).rejects.toThrow(/PNG/);
+  });
+
+  it("does not retry a 4xx download", async () => {
+    const fetch = vi.fn(async () => res("denied", 403));
+    const { gen, sleeps } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });
+    const s = await gen.generate("go");
+    await expect(s.getHtml()).rejects.toThrow(/403/);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("retries a 5xx download twice with backoff", async () => {
+    const fetch = vi.fn(async () => res("down", 503));
+    const { gen, sleeps } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });
+    const s = await gen.generate("go");
+    await expect(s.getHtml()).rejects.toThrow(/503/);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([1000, 4000]);
+  });
+});

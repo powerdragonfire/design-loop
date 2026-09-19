@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Generate screen designs with Google Stitch, critique them with a five-dimension committee, iterate until a measured stopping rule fires.",
   "scripts": {
+    "design-loop": "tsx src/cli/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -17,6 +18,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
+    "tsx": "^4.23.13",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1"
   },

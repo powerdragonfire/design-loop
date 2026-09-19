@@ -73,7 +73,7 @@ async function readScreens(dir: string): Promise<Record<string, string>> {
 /**
  * Load and validate a design/ folder. Validation runs cheapest-and-most-fundamental first
  * so that nothing downstream can spend money before a bad contract fails:
- * config parses -> weights sum to 1.0 -> batchMode off -> sigma measured -> screen exists.
+ * config and tokens.json parse -> weights sum to 1.0 -> batchMode off -> sigma measured -> screen exists.
  */
 export async function loadContract(
   dir: string,
@@ -91,6 +91,15 @@ export async function loadContract(
   }
   const config: Config = parsed.data;
 
+  const tokens = await readJson(join(dir, "tokens.json"), "tokens.json");
+  if (!isPlainObject(tokens)) {
+    throw new Error("tokens.json must be a JSON object");
+  }
+  // Full W3C DTCG shape validation is intentionally not enforced in v1: bare-leaf tokens are accepted.
+  if (Object.keys(tokens).length === 0) {
+    throw new Error("tokens.json defines no tokens");
+  }
+
   const sum = Object.values(config.weights).reduce((a, b) => a + b, 0);
   if (Math.abs(sum - 1) > WEIGHT_EPSILON) {
     throw new Error(`weights must sum to 1.0, got ${Number(sum.toPrecision(12))}`);
@@ -104,10 +113,6 @@ export async function loadContract(
     throw new Error("sigma is null — run `design-loop calibrate` first");
   }
 
-  const tokens = await readJson(join(dir, "tokens.json"), "tokens.json");
-  if (!isPlainObject(tokens)) {
-    throw new Error("tokens.json must be a JSON object");
-  }
   const brief = await readFile(join(dir, "brief.md"), "utf8").catch(() => {
     throw new Error(`cannot read brief.md: ${join(dir, "brief.md")}`);
   });

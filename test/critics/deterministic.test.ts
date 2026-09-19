@@ -52,6 +52,12 @@ describe("deterministicCritique", () => {
     expect(critique.issues.some(i => i.evidence.selector === "#w")).toBe(false);
   });
 
+  it("flags a low-contrast pair written in oklch(), which the parser used to skip in silence", async () => {
+    const page = `<body style="margin:0;background:oklch(0.25 0 0)"><p id="t" style="color:oklch(0.3 0 0)">hi</p></body>`;
+    const { critique } = deterministicCritique(await measure(page), tokens);
+    expect(critique.issues.some(i => i.evidence.selector === "#t" && /contrast/i.test(i.claim))).toBe(true);
+  });
+
   it("does not flag an interactive element that sits below the fold", async () => {
     const page = `<body style="margin:0"><button id="f" style="margin-top:2000px;width:60px;height:60px;color:#0B0B0F;background:#FF7A1A">x</button></body>`;
     const { critique } = deterministicCritique(await measure(page), tokens);

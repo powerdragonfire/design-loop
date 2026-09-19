@@ -35,13 +35,15 @@ export interface FetchResponse {
   status: number;
   text(): Promise<string>;
   arrayBuffer(): Promise<ArrayBuffer>;
+  /** `Response.body`, when the implementation has one: cancelling it frees the socket of a refused download. */
+  body?: { cancel(): Promise<unknown> } | null;
 }
 
 export interface StitchGeneratorOptions {
   project: SdkProject;
   /** Directory whose `.design-loop/quota.json` counts this month's generations. */
   quotaDir: string;
-  fetch?: (url: string) => Promise<FetchResponse>;
+  fetch?: (url: string, init?: { signal?: AbortSignal }) => Promise<FetchResponse>;
   sleep?: (ms: number) => Promise<void>;
   modelId?: ModelId;
   /** Conker is a phone app, and the SDK's own default leaves the device unspecified. */
@@ -50,6 +52,8 @@ export interface StitchGeneratorOptions {
 
 /** Waits before the 2nd and 3rd attempt. */
 const BACKOFF_MS = [1000, 4000];
+/** A download that has not finished in a minute is hung; without this the whole run waits on it forever. */
+const DOWNLOAD_TIMEOUT_MS = 60_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 class DownloadError extends Error {
@@ -65,10 +69,20 @@ class DownloadError extends Error {
 const retryableDownload = (err: unknown): boolean =>
   !(err instanceof DownloadError && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429);
 
+/** The body of a refused download is never read, so it is discarded explicitly rather than left open. */
+async function drain(res: FetchResponse): Promise<void> {
+  try {
+    if (res.body) await res.body.cancel();
+    else await res.arrayBuffer();
+  } catch {
+    // Discarding a body that cannot be read changes nothing: the caller is about to throw anyway.
+  }
+}
+
 export class StitchGenerator implements Generator {
   private readonly project: SdkProject;
   private readonly quotaDir: string;
-  private readonly fetchUrl: (url: string) => Promise<FetchResponse>;
+  private readonly fetchUrl: (url: string, init?: { signal?: AbortSignal }) => Promise<FetchResponse>;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly modelId: ModelId | undefined;
   private readonly deviceType: DeviceType;
@@ -76,7 +90,7 @@ export class StitchGenerator implements Generator {
   constructor(opts: StitchGeneratorOptions) {
     this.project = opts.project;
     this.quotaDir = opts.quotaDir;
-    this.fetchUrl = opts.fetch ?? ((url) => fetch(url));
+    this.fetchUrl = opts.fetch ?? ((url, init) => fetch(url, init));
     this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.modelId = opts.modelId;
     this.deviceType = opts.deviceType ?? "MOBILE";
@@ -125,7 +139,9 @@ export class StitchGenerator implements Generator {
 
   /**
    * Resolves the SDK's URL, then fetches it and reads the body, all inside the retried step so a connection reset
-   * mid-body is retried like a failed request. Errors name the screen, never the URL (it can carry a signed token).
+   * mid-body is retried like a failed request. Errors name the screen, never the URL (it can carry a signed token):
+   * undici puts the URL in some of its own messages, and an abort reason reaches the manifest and the report, so
+   * a raw rejection is replaced by its class name alone.
    */
   private async download<T>(
     inner: SdkScreen,
@@ -136,9 +152,18 @@ export class StitchGenerator implements Generator {
     const url = await this.retry(getUrl);
     if (!url) throw new Error(`Stitch returned an empty ${what} URL for screen ${inner.id}`);
     return this.retry(async () => {
-      const res = await this.fetchUrl(url);
-      if (!res.ok) throw new DownloadError(`Stitch ${what} download for screen ${inner.id} failed: HTTP ${res.status}`, res.status);
-      return read(res);
+      try {
+        const res = await this.fetchUrl(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+        if (!res.ok) {
+          await drain(res);
+          throw new DownloadError(`Stitch ${what} download for screen ${inner.id} failed: HTTP ${res.status}`, res.status);
+        }
+        return await read(res);
+      } catch (err) {
+        // A DownloadError already names the screen and its status, which the retry policy reads.
+        if (err instanceof DownloadError) throw err;
+        throw new Error(`Stitch ${what} download for screen ${inner.id} failed: ${(err as Error)?.name ?? "unknown error"}`);
+      }
     }, retryableDownload);
   }
 }

@@ -63,4 +63,32 @@ describe("measure", () => {
     const depth = (sel: string) => doc.nodes.find(n => n.selector === sel)!.depth;
     expect(["#a", "#b", "#c"].map(depth)).toEqual([0, 1, 2]);
   });
+
+  it("normalises a colour in any syntax to rgb(), so the contrast and token checks can read it", async () => {
+    const doc = await measure(`<p id="t" style="color:oklch(0.7 0.15 50)">hi</p>`);
+    expect(doc.nodes.find(n => n.selector === "#t")!.style.color).toMatch(/^rgb\(\d+, \d+, \d+\)$/);
+  });
+
+  it("keeps the alpha of a translucent colour, rounded to three decimals", async () => {
+    const doc = await measure(`<p id="t" style="color:rgba(255, 0, 0, 0.5)">hi</p>`);
+    // 0.5 alpha is stored as the byte 128, so it reads back as 128/255 = 0.502.
+    expect(doc.nodes.find(n => n.selector === "#t")!.style.color).toBe("rgba(255, 0, 0, 0.502)");
+  });
+
+  it("treats a zero-alpha background as unpainted, whatever its colour channels say", async () => {
+    const doc = await measure(
+      `<body style="margin:0;background:#0B0B0F"><div style="background:rgba(255,255,255,0)"><p id="t">hi</p></div></body>`,
+    );
+    expect(doc.nodes.find(n => n.selector === "#t")!.style.effectiveBackground).toBe("rgb(11, 11, 15)");
+  });
+
+  it("measures an inline SVG as one node, not one line per shape inside the icon", async () => {
+    const doc = await measure(
+      `<svg id="icon" width="24" height="24"><circle cx="5" cy="5" r="4"/><rect x="1" y="1" width="8" height="8"/><path d="M0 0 L10 10"/></svg>`,
+    );
+    expect(doc.nodes.filter(n => n.tag === "svg")).toHaveLength(1);
+    expect(doc.nodes.map(n => n.tag)).not.toContain("circle");
+    expect(doc.nodes.map(n => n.tag)).not.toContain("rect");
+    expect(doc.nodes.map(n => n.tag)).not.toContain("path");
+  });
 }, 30_000);

@@ -1,4 +1,4 @@
-import { chromium } from "playwright";
+import { chromium, errors as playwrightErrors } from "playwright";
 import type { MeasuredDoc, MeasuredNode } from "../types.js";
 
 export const VIEWPORT = { w: 393, h: 852 };
@@ -17,7 +17,13 @@ export async function measure(html: string): Promise<MeasuredDoc> {
       viewport: { width: VIEWPORT.w, height: VIEWPORT.h },
       deviceScaleFactor: 3,
     });
-    await page.setContent(html, { waitUntil: "networkidle" });
+    // Stitch pages load Tailwind's CDN, Google Fonts and Material Symbols; offline, or behind a slow proxy,
+    // the network never goes idle. A timeout here means "measure what has loaded", not "fail the run".
+    try {
+      await page.setContent(html, { waitUntil: "networkidle", timeout: 15_000 });
+    } catch (err) {
+      if (!(err instanceof playwrightErrors.TimeoutError)) throw err;
+    }
     const nodes = await page.evaluate((props) => {
       // Build a stable unique selector: prefer #id ONLY when that id is unique in
       // the document (generated HTML often repeats ids), else an nth-of-type path.
@@ -41,13 +47,44 @@ export async function measure(html: string): Promise<MeasuredDoc> {
         }
         return parts.join(" > ");
       }
+      // Chromium serialises a computed colour in the syntax it was written in, so Tailwind v4's
+      // `oklch()` palette (and `color()`, `color-mix()`) reaches the deterministic critic unparseable
+      // and every contrast and token check is skipped in silence. Painting the value into a 1x1 canvas
+      // and reading the pixel back turns any colour syntax into sRGB bytes plus alpha.
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      const unreadable = (value: string) => ({
+        css: value,
+        a: value === "rgba(0, 0, 0, 0)" || value === "transparent" ? 0 : 255,
+      });
+      function paint(value: string): { css: string; a: number } {
+        if (!ctx) return unreadable(value);
+        try {
+          ctx.clearRect(0, 0, 1, 1);
+          ctx.fillStyle = value;
+          ctx.fillRect(0, 0, 1, 1);
+          const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data as unknown as number[];
+          return {
+            css: a === 255
+              ? `rgb(${r}, ${g}, ${b})`
+              : `rgba(${r}, ${g}, ${b}, ${Number(((a as number) / 255).toFixed(3))})`,
+            a: a as number,
+          };
+        } catch {
+          return unreadable(value);
+        }
+      }
       // MeasuredDoc has no parent links, and `#id` selectors lose their path, so
       // consumers cannot walk ancestors. Resolve the painted background here.
-      // Fully transparent layers are skipped; partial alpha is NOT composited (v1).
+      // A layer with ALPHA 0 paints nothing, whatever its channels say (`bg-white/0` is
+      // `rgba(255, 255, 255, 0)`, which a string comparison read as painted); partial
+      // alpha is NOT composited (v1).
       function effectiveBg(el: Element): string {
         for (let cur: Element | null = el; cur; cur = cur.parentElement) {
-          const bg = getComputedStyle(cur).backgroundColor;
-          if (bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") return bg;
+          const bg = paint(getComputedStyle(cur).backgroundColor);
+          if (bg.a !== 0) return bg.css;
         }
         return "rgb(255, 255, 255)"; // the browser paints a white canvas by default
       }
@@ -58,12 +95,18 @@ export async function measure(html: string): Promise<MeasuredDoc> {
       }
       const out: any[] = [];
       for (const el of Array.from(document.body.querySelectorAll("*"))) {
+        // An icon's internals (path, circle, g) are not elements a critic can act on, and each one
+        // would be a full digest line: the <svg> root stands for the whole icon.
+        if ((el as SVGElement).ownerSVGElement) continue;
         const cs = getComputedStyle(el);
         if (cs.display === "none" || cs.visibility === "hidden") continue;
         const r = el.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) continue;
         const style: Record<string, string> = {};
         for (const p of props) style[p] = (cs as any)[p];
+        for (const p of ["color", "backgroundColor"]) {
+          if (style[p] !== undefined) style[p] = paint(style[p]).css;
+        }
         style.effectiveBackground = effectiveBg(el);
         out.push({
           selector: sel(el),

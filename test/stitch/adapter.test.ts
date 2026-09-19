@@ -157,6 +157,48 @@ describe("StitchGenerator", () => {
     expect(sleeps).toEqual([1000, 4000]);
   });
 
+  it("names the screen and never the signed URL when a download rejects outright", async () => {
+    const fetch = vi.fn(async () => { throw new TypeError("Failed to parse URL from https://x/img?token=SECRET"); });
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });
+    const s = await gen.generate("go");
+    const err = await s.getHtml().then(() => null, (e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).toContain("screen s1");
+    expect(err!.message).toContain("TypeError");
+    expect(err!.message).not.toContain("SECRET");
+    expect(err!.message).not.toContain("https://");
+  });
+
+  it("gives every download a timeout signal, so a hung transfer cannot hang the run", async () => {
+    const inits: ({ signal?: AbortSignal } | undefined)[] = [];
+    const fetch = vi.fn(async (url: string, init?: { signal?: AbortSignal }) => {
+      inits.push(init);
+      return url.endsWith("html") ? res("<p>hi</p>") : res(PNG);
+    });
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });
+    await (await gen.generate("go")).getHtml();
+    expect(inits[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(inits[0]!.signal!.aborted).toBe(false);
+  });
+
+  it("cancels the body of a refused download instead of leaving the socket open", async () => {
+    const cancel = vi.fn(async () => {});
+    const fetch = vi.fn(async () => ({ ...res("denied", 403), body: { cancel } }));
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });
+    const s = await gen.generate("go");
+    await expect(s.getHtml()).rejects.toThrow(/403/);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the body away when a refused response exposes no stream to cancel", async () => {
+    const arrayBuffer = vi.fn(async () => new ArrayBuffer(0));
+    const fetch = vi.fn(async () => ({ ok: false, status: 403, text: async () => "denied", arrayBuffer }));
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });
+    const s = await gen.generate("go");
+    await expect(s.getHtml()).rejects.toThrow(/403/);
+    expect(arrayBuffer).toHaveBeenCalledTimes(1);
+  });
+
   it("retries a 5xx download twice with backoff", async () => {
     const fetch = vi.fn(async () => res("down", 503));
     const { gen, sleeps } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });

@@ -11,6 +11,7 @@ import type { Generator, Screen } from "../stitch/adapter.js";
 import { readQuota } from "../stitch/quota.js";
 import { openRun, type Degradation } from "../store/store.js";
 import { costUsd } from "./pricing.js";
+import { groupTokenIssues } from "./group.js";
 import { buildFirstPrompt } from "./prompt.js";
 import type { CriticName, Critique, Issue, MeasuredDoc, Usage } from "../types.js";
 
@@ -160,10 +161,12 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       // A regression is judged against the noise floor, as convergence is. The chair then works on the BEST
       // version, so it is given that version's screenshot and open issues, and the prompt that broke it.
       const regressed = last.composite < best.composite - cfg.convergenceSigmas * sigma;
+      // Only what the CHAIR sees is grouped: one off-token value on twenty elements is one edit, not twenty
+      // rounds of the three-change cap. The store, the gate and the critics keep the per-selector issues.
       const chairInput = regressed
         ? {
             critiques: last.critiques,
-            openIssues: best.open,
+            openIssues: groupTokenIssues(best.open),
             imagePng: best.png,
             tokens: contract.tokens,
             regression: {
@@ -173,7 +176,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
               failedPrompt: last.prompt,
             },
           }
-        : { critiques: last.critiques, openIssues: last.open, imagePng: last.png, tokens: contract.tokens, regression: null };
+        : { critiques: last.critiques, openIssues: groupTokenIssues(last.open), imagePng: last.png, tokens: contract.tokens, regression: null };
 
       let next;
       try {

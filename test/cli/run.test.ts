@@ -309,4 +309,22 @@ describe("runScreen", () => {
     expect(ch.requested).toBe(5);
     expect(ch.applied.map((i: { id: string }) => i.id)).toEqual(["typography-a", "typography-b", "typography-c"]);
   });
+
+  it("groups the chair's token blockers by value, while the store keeps one issue per element", async () => {
+    const dir = setup(); const c = chairOf();
+    const offToken = `<!doctype html><html><body style="margin:0;background:#0B0B0F">
+       <p id="t1" style="color:#9A9A9A">one</p>
+       <p id="t2" style="color:#9A9A9A">two</p>
+       <button id="b1" style="width:48px;height:48px;background:#FF7A1A;color:#0B0B0F">Go</button>
+       </body></html>`;
+    const gen = new FakeGenerator(Array(6).fill({ html: offToken, png: Buffer.from("p") }));
+    await run(dir, gen, llmOf([70, 75]).llm, c.client);
+    const stored = readJson(join(runDir(dir), "v00", "open-issues.json")).map((i: Issue) => i.id);
+    expect(stored).toContain("det-token-color-#t1");
+    expect(stored).toContain("det-token-color-#t2");
+    const seen = c.inputs[0].openIssues;
+    expect(seen.map(i => i.id)).toContain("det-token-group-color-1");
+    expect(seen.map(i => i.id)).not.toContain("det-token-color-#t1");
+    expect(seen.find(i => i.id === "det-token-group-color-1")!.claim).toContain("#t1, #t2");
+  });
 }, 240_000);

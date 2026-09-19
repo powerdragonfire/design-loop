@@ -58,9 +58,12 @@ class DownloadError extends Error {
   }
 }
 
-/** A 4xx will not change on retry (expired or forbidden URL); a 5xx or a network failure might. */
+/**
+ * A 4xx will not change on retry (expired or forbidden URL), except 408 and 429, which say "try again". A 5xx or a
+ * network failure, including a reset mid-body, might clear too.
+ */
 const retryableDownload = (err: unknown): boolean =>
-  !(err instanceof DownloadError && err.status >= 400 && err.status < 500);
+  !(err instanceof DownloadError && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429);
 
 export class StitchGenerator implements Generator {
   private readonly project: SdkProject;
@@ -107,9 +110,11 @@ export class StitchGenerator implements Generator {
     return {
       id: inner.id,
       edit: (prompt) => this.spend(() => inner.edit(prompt, this.deviceType, this.modelId)),
-      getHtml: async () => (await this.download(inner, "HTML", () => inner.getHtml())).text(),
+      getHtml: () => this.download(inner, "HTML", () => inner.getHtml(), (res) => res.text()),
       getImage: async () => {
-        const png = Buffer.from(await (await this.download(inner, "image", () => inner.getImage())).arrayBuffer());
+        const png = await this.download(inner, "image", () => inner.getImage(), async (res) =>
+          Buffer.from(await res.arrayBuffer()),
+        );
         if (png.length < PNG_SIGNATURE.length || !png.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
           throw new Error(`Stitch image for screen ${inner.id} is not a PNG`);
         }
@@ -118,24 +123,42 @@ export class StitchGenerator implements Generator {
     };
   }
 
-  /** Resolves the SDK's URL, then fetches it. Errors name the screen, never the URL (it can carry a signed token). */
-  private async download(inner: SdkScreen, what: string, getUrl: () => Promise<string>): Promise<FetchResponse> {
+  /**
+   * Resolves the SDK's URL, then fetches it and reads the body, all inside the retried step so a connection reset
+   * mid-body is retried like a failed request. Errors name the screen, never the URL (it can carry a signed token).
+   */
+  private async download<T>(
+    inner: SdkScreen,
+    what: string,
+    getUrl: () => Promise<string>,
+    read: (res: FetchResponse) => Promise<T>,
+  ): Promise<T> {
     const url = await this.retry(getUrl);
     if (!url) throw new Error(`Stitch returned an empty ${what} URL for screen ${inner.id}`);
     return this.retry(async () => {
       const res = await this.fetchUrl(url);
       if (!res.ok) throw new DownloadError(`Stitch ${what} download for screen ${inner.id} failed: HTTP ${res.status}`, res.status);
-      return res;
+      return read(res);
     }, retryableDownload);
   }
 }
 
-/** Production wiring: `STITCH_API_KEY` is read by the SDK itself, `STITCH_PROJECT_ID` picks the project. */
+/**
+ * Production wiring. `STITCH_PROJECT_ID` picks the project; the SDK authenticates from either `STITCH_API_KEY` or
+ * `STITCH_ACCESS_TOKEN` with `GOOGLE_CLOUD_PROJECT` (spec §4). Errors name variables, never their values.
+ */
 export function createStitchGenerator(opts: Omit<StitchGeneratorOptions, "project">): StitchGenerator {
-  for (const name of ["STITCH_API_KEY", "STITCH_PROJECT_ID"]) {
-    if (!process.env[name]) throw new Error(`${name} is not set; Stitch generation needs it`);
+  const env = process.env;
+  const projectId = env.STITCH_PROJECT_ID;
+  if (!projectId) throw new Error("STITCH_PROJECT_ID is not set; Stitch generation needs the project to generate in");
+  if (!env.STITCH_API_KEY && !(env.STITCH_ACCESS_TOKEN && env.GOOGLE_CLOUD_PROJECT)) {
+    if (!env.STITCH_ACCESS_TOKEN && !env.GOOGLE_CLOUD_PROJECT) {
+      throw new Error("Stitch has no credentials: set STITCH_API_KEY, or both STITCH_ACCESS_TOKEN and GOOGLE_CLOUD_PROJECT");
+    }
+    const missing = env.STITCH_ACCESS_TOKEN ? "GOOGLE_CLOUD_PROJECT" : "STITCH_ACCESS_TOKEN";
+    throw new Error(`${missing} is not set; the OAuth route needs both STITCH_ACCESS_TOKEN and GOOGLE_CLOUD_PROJECT (or set STITCH_API_KEY)`);
   }
-  return new StitchGenerator({ ...opts, project: stitch.project(process.env.STITCH_PROJECT_ID!) });
+  return new StitchGenerator({ ...opts, project: stitch.project(projectId) });
 }
 
 export interface FakeScreenSpec {

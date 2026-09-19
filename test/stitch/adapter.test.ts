@@ -140,6 +140,23 @@ describe("StitchGenerator", () => {
     expect(sleeps).toEqual([]);
   });
 
+  it("retries a 429 download and a body read that fails mid-stream", async () => {
+    let n = 0;
+    const flaky = vi.fn(async (_url: string) => {
+      n++;
+      if (n === 1) return res("slow down", 429);
+      if (n === 2) return { ok: true, status: 200,
+        text: async () => { throw new Error("socket hang up"); },
+        arrayBuffer: async () => { throw new Error("socket hang up"); } };
+      return res("<p>ok</p>");
+    });
+    const { gen, sleeps } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch: flaky });
+    const s = await gen.generate("go");
+    expect(await s.getHtml()).toBe("<p>ok</p>");
+    expect(flaky).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([1000, 4000]);
+  });
+
   it("retries a 5xx download twice with backoff", async () => {
     const fetch = vi.fn(async () => res("down", 503));
     const { gen, sleeps } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });

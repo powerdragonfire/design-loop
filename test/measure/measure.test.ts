@@ -28,4 +28,33 @@ describe("measure", () => {
     const doc = await measure(`<div style="display:none" id="x">hi</div>`);
     expect(doc.nodes.find(n => n.selector === "#x")).toBeUndefined();
   });
+
+  it("reports only an element's OWN text, not its descendants' text", async () => {
+    const doc = await measure(`<div id="d"><p id="t">hi</p></div>`);
+    expect(doc.nodes.find(n => n.selector === "#d")!.text).toBe("");
+    expect(doc.nodes.find(n => n.selector === "#t")!.text).toBe("hi");
+  });
+
+  it("supplies effectiveBackground from the nearest painted ancestor, through body", async () => {
+    const doc = await measure(`<body style="margin:0;background:#0B0B0F"><div><p id="t">hi</p></div></body>`);
+    expect(doc.nodes.find(n => n.selector === "#t")!.style.effectiveBackground).toBe("rgb(11, 11, 15)");
+  });
+
+  it("uses an element's own background as its effectiveBackground", async () => {
+    const doc = await measure(html);
+    expect(doc.nodes.find(n => n.selector === "#p1")!.style.effectiveBackground).toBe("rgb(11, 11, 15)");
+  });
+
+  it("falls back to white when nothing paints a background", async () => {
+    const doc = await measure(`<p id="t">hi</p>`);
+    expect(doc.nodes.find(n => n.selector === "#t")!.style.effectiveBackground).toBe("rgb(255, 255, 255)");
+  });
+
+  it("gives every node a unique selector, even with duplicate or awkward ids", async () => {
+    const doc = await measure(`<p id="a">x</p><p id="a">y</p><p id="b:c">z</p>`);
+    const sels = doc.nodes.map(n => n.selector);
+    expect(new Set(sels).size).toBe(sels.length);
+    expect(sels).not.toContain("#a");
+    expect(sels).toContain("#b\\:c");
+  });
 }, 30_000);

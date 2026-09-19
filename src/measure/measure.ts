@@ -19,9 +19,15 @@ export async function measure(html: string): Promise<MeasuredDoc> {
     });
     await page.setContent(html, { waitUntil: "networkidle" });
     const nodes = await page.evaluate((props) => {
-      // Build a stable unique selector: prefer #id, else nth-of-type path.
+      // Build a stable unique selector: prefer #id ONLY when that id is unique in
+      // the document (generated HTML often repeats ids), else an nth-of-type path.
+      // Task 4 resolves critic-cited selectors against these strings, so
+      // uniqueness is a correctness requirement, and ids are CSS-escaped so
+      // `#b\:c`-style ids stay valid selectors.
       function sel(el: Element): string {
-        if (el.id) return `#${el.id}`;
+        if (el.id && document.querySelectorAll(`[id="${el.id.replace(/"/g, '\\"')}"]`).length === 1) {
+          return `#${CSS.escape(el.id)}`;
+        }
         const parts: string[] = [];
         let cur: Element | null = el;
         while (cur && cur.tagName !== "HTML") {
@@ -35,6 +41,16 @@ export async function measure(html: string): Promise<MeasuredDoc> {
         }
         return parts.join(" > ");
       }
+      // MeasuredDoc has no parent links, and `#id` selectors lose their path, so
+      // consumers cannot walk ancestors. Resolve the painted background here.
+      // Fully transparent layers are skipped; partial alpha is NOT composited (v1).
+      function effectiveBg(el: Element): string {
+        for (let cur: Element | null = el; cur; cur = cur.parentElement) {
+          const bg = getComputedStyle(cur).backgroundColor;
+          if (bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") return bg;
+        }
+        return "rgb(255, 255, 255)"; // the browser paints a white canvas by default
+      }
       const out: any[] = [];
       for (const el of Array.from(document.body.querySelectorAll("*"))) {
         const cs = getComputedStyle(el);
@@ -43,11 +59,20 @@ export async function measure(html: string): Promise<MeasuredDoc> {
         if (r.width === 0 || r.height === 0) continue;
         const style: Record<string, string> = {};
         for (const p of props) style[p] = (cs as any)[p];
+        style.effectiveBackground = effectiveBg(el);
         out.push({
           selector: sel(el),
           tag: el.tagName.toLowerCase(),
           role: el.getAttribute("role"),
-          text: (el.textContent ?? "").trim().slice(0, 120),
+          // Own direct text only. textContent aggregates descendants, which would
+          // repeat the same string at every ancestor level (duplicate contrast
+          // issues, and wasted digest tokens in Task 7).
+          text: Array.from(el.childNodes)
+            .filter(n => n.nodeType === Node.TEXT_NODE)
+            .map(n => (n.textContent ?? "").trim())
+            .filter(Boolean)
+            .join(" ")
+            .slice(0, 120),
           bbox: { x: r.x, y: r.y, w: r.width, h: r.height },
           style,
         });

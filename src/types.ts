@@ -52,3 +52,10 @@ export interface Contract {
   config: Config;
   screens: Record<string, string>;
 }
+
+/** Token spend accumulated by an LLM client; the manifest records it (spec §11). */
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+}

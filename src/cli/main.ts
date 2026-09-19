@@ -12,6 +12,7 @@ import { buildReport, captureApproval } from "../report/report.js";
 import { createStitchGenerator, type Generator } from "../stitch/adapter.js";
 import { abDistiller, calibrate } from "./calibrate.js";
 import { runScreen } from "./run.js";
+import { isSkipped, smoke } from "./smoke.js";
 
 export interface Deps {
   runScreen: typeof runScreen;
@@ -19,6 +20,7 @@ export interface Deps {
   captureApproval: typeof captureApproval;
   calibrate: typeof calibrate;
   abDistiller: typeof abDistiller;
+  smoke: typeof smoke;
   makeGenerator(): Generator;
   makeLlm(): LlmClient;
   makeChair(): ChairClient;
@@ -39,6 +41,7 @@ export interface Io {
 const USAGE = `Usage: design-loop [--design <dir>] <command>
 
 Commands:
+  smoke                              check every live service once, before spending real money
   run <screen> [--date YYYY-MM-DD]   generate and critique a screen until a stopping rule fires
   review <runDir>                    open the report, then ask which version to approve
   report <runDir>                    build the report page and open it
@@ -64,6 +67,7 @@ export function defaultDeps(designDir: string, io: Io): Deps {
     captureApproval,
     calibrate,
     abDistiller,
+    smoke,
     makeGenerator: () => createStitchGenerator({ quotaDir: designDir }),
     makeLlm: () => new AnthropicLlmClient(),
     makeChair: () => new AnthropicChairClient(),
@@ -152,6 +156,30 @@ async function runCommand(d: Deps, io: Io, designDir: string, screen: string, da
   return result.stopReason === "aborted" ? 3 : 0;
 }
 
+/**
+ * The diagnostic the operator runs before the first paid run. Every step is printed whatever the others
+ * did, and only a step that actually failed — not one that was skipped for want of an earlier step's
+ * output — decides the exit code.
+ */
+async function smokeCommand(d: Deps, io: Io, designDir: string): Promise<number> {
+  await d.preflight();
+  io.out("Checking the live services. This uses 2 Stitch generations and roughly $0.30 of Claude spend.");
+  const report = await d.smoke({
+    designDir,
+    generator: d.makeGenerator(),
+    llm: d.makeLlm(),
+    chairClient: d.makeChair(),
+  });
+  let failed = false;
+  for (const step of report.steps) {
+    const label = isSkipped(step) ? "SKIP" : step.ok ? "PASS" : "FAIL";
+    if (label === "FAIL") failed = true;
+    io.out(`${label} ${step.name}: ${step.detail}`);
+  }
+  io.out(`Estimated spend: ${usd(report.usd)}`);
+  return failed ? 1 : 0;
+}
+
 async function reviewCommand(d: Deps, io: Io, runDir: string): Promise<number> {
   const report = await d.buildReport(runDir);
   io.out(`Report: ${report}`);
@@ -205,6 +233,9 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
         if (!DATE.test(date)) throw new UsageError(`--date must be YYYY-MM-DD (got ${date})`);
         return await runCommand(d, io, designDir, args[0]!, date);
       }
+      case "smoke":
+        need(0, "no arguments");
+        return await smokeCommand(d, io, designDir);
       case "report": {
         need(1, "one argument: <runDir>");
         const report = await d.buildReport(args[0]!);

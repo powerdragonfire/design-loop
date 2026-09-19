@@ -11,6 +11,7 @@ const deps = (over: Partial<Deps> = {}): Partial<Deps> => ({
   buildReport: vi.fn(async (d: string) => `${d}/report.html`),
   captureApproval: vi.fn(async () => {}),
   calibrate: vi.fn(async () => ({ sigma: 3.2, perCritic: { typography: 4 }, repeats: 5, screens: ["a"], usd: 2.1 })),
+  smoke: vi.fn(async () => ({ steps: [{ name: "critic call", ok: true, detail: "typography returned score 82" }], usd: 0.12 })),
   abDistiller: vi.fn(async () => ({ screens: [{ screen: "a", rawIssues: [], digestIssues: [], rawOnly: [{ critic: "typography", severity: "major", claim: "letter spacing" }] }], usd: 8 })),
   makeGenerator: vi.fn(() => ({ generate: vi.fn() }) as any),
   makeLlm: vi.fn(() => ({ critique: vi.fn() }) as any),
@@ -168,6 +169,50 @@ describe("main", () => {
     expect(d.calibrate).toHaveBeenCalledWith(expect.objectContaining({ designDir: "design", repeats: 3 }));
     expect(c.out.join("\n")).toMatch(/3\.2/);
     expect(c.out.join("\n")).toMatch(/\$2\.1/);
+  });
+
+  it("smoke runs the preflight, prints a line per step, and exits 0 when they all passed", async () => {
+    const c = capture(); const d = deps();
+    expect(await main(["smoke"], c.io, d)).toBe(0);
+    expect(d.preflight).toHaveBeenCalled();
+    expect(d.smoke).toHaveBeenCalledWith(expect.objectContaining({ designDir: "design" }));
+    const text = c.out.join("\n");
+    expect(text).toContain("PASS critic call");
+    expect(text).toContain("typography returned score 82");
+    expect(text).toContain("$0.12");
+    expect(text).toMatch(/2 Stitch generations/);
+  });
+
+  it("smoke exits 1 on a failed step and marks a skipped one SKIP", async () => {
+    const c = capture();
+    const d = deps({ smoke: vi.fn(async () => ({
+      steps: [
+        { name: "stitch generate", ok: false, detail: "Stitch is unreachable" },
+        { name: "stitch edit", ok: false, detail: "skipped: the generate step did not succeed" },
+      ],
+      usd: null,
+    })) });
+    expect(await main(["smoke"], c.io, d)).toBe(1);
+    expect(c.out.join("\n")).toContain("FAIL stitch generate");
+    expect(c.out.join("\n")).toContain("SKIP stitch edit");
+  });
+
+  it("smoke does not fail the command for a step that was only skipped", async () => {
+    const d = deps({ smoke: vi.fn(async () => ({
+      steps: [
+        { name: "critic call", ok: true, detail: "fine" },
+        { name: "prompt cache", ok: false, detail: "skipped: nothing to hit" },
+      ],
+      usd: 0,
+    })) });
+    expect(await main(["smoke"], capture().io, d)).toBe(0);
+  });
+
+  it("smoke takes no arguments, and honours --design", async () => {
+    expect(await main(["smoke", "home"], capture().io, deps())).toBe(2);
+    const d = deps();
+    await main(["--design", "x/design", "smoke"], capture().io, d);
+    expect(d.smoke).toHaveBeenCalledWith(expect.objectContaining({ designDir: "x/design" }));
   });
 
   it("ab-distiller prints the raw-only triage list", async () => {

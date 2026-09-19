@@ -80,6 +80,39 @@ describe("promoteResolutions", () => {
     expect(out[0].resolved.verified).toEqual([]);
   });
 
+  const sized = (y: number, w: number): MeasuredDoc => ({
+    viewport: { w: 393, h: 852 },
+    nodes: [{ ...node("#real", "rgb(1, 1, 1)"), bbox: { x: 0, y, w, h: 10 } }],
+  });
+
+  it("does not verify a claim when only the element's POSITION changed", () => {
+    const c = critique({ resolved: { claimed: ["old-1"], verified: [] } });
+    const out = promoteResolutions([c], sized(0, 10), sized(40, 10), prevIssues);
+    expect(out[0].resolved.verified).toEqual([]);
+  });
+
+  it("verifies a claim when the element's SIZE changed", () => {
+    const c = critique({ resolved: { claimed: ["old-1"], verified: [] } });
+    const out = promoteResolutions([c], sized(0, 10), sized(0, 48), prevIssues);
+    expect(out[0].resolved.verified).toEqual(["old-1"]);
+  });
+
+  it("does not verify a claim for an id the committee raised again this round", () => {
+    const c = critique({
+      issues: [issue("old-1", "#real")],
+      resolved: { claimed: ["old-1"], verified: [] },
+    });
+    const out = promoteResolutions([c], doc("rgb(1, 1, 1)"), doc("rgb(9, 9, 9)"), prevIssues);
+    expect(out[0].resolved.verified).toEqual([]);
+  });
+
+  it("does not verify an id re-raised by a different critic", () => {
+    const claimer = critique({ resolved: { claimed: ["old-1"], verified: [] } });
+    const raiser = critique({ critic: "accessibility", issues: [issue("old-1", "#real")] });
+    const out = promoteResolutions([claimer, raiser], doc("rgb(1, 1, 1)"), doc("rgb(9, 9, 9)"), prevIssues);
+    expect(out[0].resolved.verified).toEqual([]);
+  });
+
   it("treats geometry changes as changes", () => {
     const moved = doc();
     moved.nodes[0].bbox = { x: 0, y: 0, w: 44, h: 44 };

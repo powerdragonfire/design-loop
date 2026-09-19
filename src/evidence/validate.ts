@@ -29,15 +29,21 @@ export function validateEvidence(
   return { critiques: validated, hallucinationRate };
 }
 
-const fingerprint = (n: MeasuredNode): string => JSON.stringify(n.style) + JSON.stringify(n.bbox);
+// Position (x, y) is deliberately excluded: an unrelated edit elsewhere shifts every
+// element below it, which would verify any claim about an untouched element. Size
+// still catches an enlarged touch target; style (incl. effectiveBackground) catches
+// colour fixes.
+const fingerprint = (n: MeasuredNode): string =>
+  JSON.stringify(n.style) + JSON.stringify([n.bbox.w, n.bbox.h]);
 
 function bySelector(doc: MeasuredDoc): Map<string, MeasuredNode> {
   return new Map(doc.nodes.map((n) => [n.selector, n]));
 }
 
 // A claimed resolution is never trusted on its own. It is verified only when a
-// previous document exists, the id was raised in the previous round, and the cited
-// element's style or geometry differs between rounds. An element present in only one
+// previous document exists, the id was raised in the previous round, no critique in
+// this round raises it again (a re-raised issue is still open), and the cited
+// element's style or size differs between rounds. An element present in only one
 // document was added or removed, which counts as changed; one absent from both gives
 // nothing to observe, so it does not. The critic's own `verified` list is discarded
 // and recomputed, and `claimed` is left untouched.
@@ -53,6 +59,7 @@ export function promoteResolutions(
   const prevNodes = bySelector(prev);
   const curNodes = bySelector(cur);
   const selectorOf = new Map(prevIssues.map((i) => [i.id, i.evidence.selector]));
+  const reRaised = new Set(critiques.flatMap((c) => c.issues.map((i) => i.id)));
 
   const changed = (selector: string): boolean => {
     const before = prevNodes.get(selector);
@@ -67,7 +74,7 @@ export function promoteResolutions(
       ...new Set(
         c.resolved.claimed.filter((id) => {
           const selector = selectorOf.get(id);
-          return selector !== undefined && changed(selector);
+          return selector !== undefined && !reRaised.has(id) && changed(selector);
         }),
       ),
     ];

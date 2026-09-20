@@ -42,6 +42,51 @@ export interface VersionInput {
    * Without it a regression cannot be read back: nothing else records what a round was trying to fix.
    */
   changes?: { requested: number; applied: Issue[] };
+  /** The Stitch screen id, so a later step can rebuild the handle without a network call. */
+  screenId?: string;
+  /** `distill(doc)`, the text the critics actually read. */
+  digest?: string;
+  /** The issues carried in from earlier rounds. */
+  carriedIssues?: Issue[];
+  /** Deterministic findings; the accessibility critic alone is shown these. */
+  measurements?: Issue[];
+}
+
+export interface GeneratedInput {
+  png: Buffer;
+  html: string;
+  doc: MeasuredDoc;
+  /** The edit prompt that produced this version. */
+  prompt: string;
+  /** The Stitch screen id, so a later step can rebuild the handle without a network call. */
+  screenId?: string;
+  parent?: string | null;
+}
+
+export interface CommitteeInputs {
+  /** `distill(doc)`, the text the critics actually read. */
+  digest: string;
+  /** The issues carried in from earlier rounds. */
+  carriedIssues: Issue[];
+  /** Deterministic findings; the accessibility critic alone is shown these. */
+  measurements: Issue[];
+}
+
+export interface ScoredInput {
+  critiques: Critique[];
+  composite: number;
+  gatePass: boolean;
+  openIssues: Issue[];
+  changes?: { requested: number; applied: Issue[] };
+}
+
+/** A claimed but not-yet-scored version directory: the shape an agent critic needs before it can critique anything. */
+export interface VersionHandle {
+  version: string;
+  dir: string;
+  writeGenerated(g: GeneratedInput): Promise<void>;
+  writeCommitteeInputs(i: CommitteeInputs): Promise<void>;
+  finish(f: ScoredInput): Promise<void>;
 }
 
 export interface Finalisation {
@@ -65,6 +110,8 @@ export interface Finalisation {
 export interface Run {
   /** The run directory, claimed by this call and by nothing else. */
   dir: string;
+  /** Claims `vNN` before anything about it is known, so an agent critic has somewhere to read from and write to. */
+  openVersion(index: number): Promise<VersionHandle>;
   /** Returns the version directory name, e.g. "v00". */
   writeVersion(v: VersionInput): Promise<string>;
   finalise(m: Finalisation): Promise<void>;
@@ -78,6 +125,11 @@ interface VersionSummary {
 }
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+
+/** The on-disk name for a version index, e.g. 3 -> "v03". */
+export function versionName(index: number): string {
+  return `v${String(index).padStart(2, "0")}`;
+}
 
 const isExists = (err: unknown): boolean => (err as NodeJS.ErrnoException).code === "EEXIST";
 
@@ -108,50 +160,86 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
   const manifestFile = join(dir, "manifest.json");
   const written = (version: string): boolean => versions.some((s) => s.version === version);
 
+  // Hoisted rather than referenced as `this.openVersion` from within the returned object literal: relying on
+  // `this` there is fragile if `Run` is ever destructured, and `writeVersion` needs to call it too.
+  const openVersion = async (index: number): Promise<VersionHandle> => {
+    if (!Number.isInteger(index) || index < 0 || index > 99) {
+      throw new Error(`Invalid version index ${index}: expected an integer from 0 to 99`);
+    }
+    if (manifest) throw new Error("Cannot write a version: the run is finalised");
+    const version = versionName(index);
+    const base = join(dir, version);
+    try {
+      await mkdir(base);
+    } catch (err) {
+      if (isExists(err)) throw new Error(`version ${version} already exists`);
+      throw err;
+    }
+    await mkdir(join(base, "critiques"));
+    await mkdir(join(base, "inbox"));
+
+    return {
+      version,
+      dir: base,
+
+      async writeGenerated(g) {
+        if (g.parent != null && !written(g.parent)) throw new Error(`no such version ${g.parent} as the parent`);
+        await Promise.all([
+          writeFile(join(base, "screen.png"), g.png),
+          writeFile(join(base, "screen.html"), g.html),
+          writeFile(join(base, "digest.json"), json(g.doc)),
+          writeFile(join(base, "prompt.txt"), g.prompt),
+          ...(g.screenId ? [writeFile(join(base, "screen-id.txt"), g.screenId)] : []),
+          ...(g.parent != null ? [writeFile(join(base, "parent.txt"), g.parent)] : []),
+        ]);
+      },
+
+      async writeCommitteeInputs(i) {
+        await Promise.all([
+          writeFile(join(base, "digest.txt"), i.digest),
+          writeFile(join(base, "carried-issues.json"), json(i.carriedIssues)),
+          writeFile(join(base, "measurements.json"), json(i.measurements)),
+        ]);
+      },
+
+      async finish(f) {
+        const critics = f.critiques.map((c) => c.critic);
+        const dup = critics.find((c, n) => critics.indexOf(c) !== n);
+        if (dup !== undefined) throw new Error(`duplicate critique for ${dup}`);
+        await Promise.all([
+          writeFile(join(base, "composite.json"), json({ composite: f.composite, gatePass: f.gatePass })),
+          writeFile(join(base, "open-issues.json"), json(f.openIssues)),
+          ...f.critiques.map((c) => writeFile(join(base, "critiques", `${c.critic}.json`), json(c))),
+          ...(f.changes
+            ? [writeFile(join(base, "changes.json"), json({
+                requested: f.changes.requested,
+                applied: f.changes.applied.map((i) => ({
+                  id: i.id, severity: i.severity, effort: i.effort, claim: i.claim, fix: i.fix,
+                  selector: i.evidence.selector,
+                })),
+              }))]
+            : []),
+        ]);
+        // A claimed-but-unscored version is not yet a version: it must not appear in the manifest's `versions`
+        // list or be a valid `parent` until it has actually been scored.
+        versions.push({ version, composite: f.composite, gatePass: f.gatePass });
+      },
+    };
+  };
+
   return {
     dir,
 
+    openVersion,
+
     async writeVersion(v) {
-      if (!Number.isInteger(v.index) || v.index < 0 || v.index > 99) {
-        throw new Error(`Invalid version index ${v.index}: expected an integer from 0 to 99`);
+      const handle = await openVersion(v.index);
+      await handle.writeGenerated({ png: v.png, html: v.html, doc: v.doc, prompt: v.prompt, screenId: v.screenId, parent: v.parent });
+      if (v.digest !== undefined) {
+        await handle.writeCommitteeInputs({ digest: v.digest, carriedIssues: v.carriedIssues ?? [], measurements: v.measurements ?? [] });
       }
-      if (manifest) throw new Error("Cannot write a version: the run is finalised");
-      const critics = v.critiques.map((c) => c.critic);
-      const dup = critics.find((c, i) => critics.indexOf(c) !== i);
-      if (dup !== undefined) throw new Error(`duplicate critique for ${dup}`);
-
-      if (v.parent != null && !written(v.parent)) throw new Error(`no such version ${v.parent} as the parent`);
-
-      const version = `v${String(v.index).padStart(2, "0")}`;
-      const base = join(dir, version);
-      try {
-        await mkdir(base);
-      } catch (err) {
-        if (isExists(err)) throw new Error(`version ${version} already exists`);
-        throw err;
-      }
-      await mkdir(join(base, "critiques"));
-      await Promise.all([
-        writeFile(join(base, "screen.png"), v.png),
-        writeFile(join(base, "screen.html"), v.html),
-        writeFile(join(base, "digest.json"), json(v.doc)),
-        writeFile(join(base, "composite.json"), json({ composite: v.composite, gatePass: v.gatePass })),
-        writeFile(join(base, "prompt.txt"), v.prompt),
-        writeFile(join(base, "open-issues.json"), json(v.openIssues)),
-        ...v.critiques.map((c) => writeFile(join(base, "critiques", `${c.critic}.json`), json(c))),
-        ...(v.parent != null ? [writeFile(join(base, "parent.txt"), v.parent)] : []),
-        ...(v.changes
-          ? [writeFile(join(base, "changes.json"), json({
-              requested: v.changes.requested,
-              applied: v.changes.applied.map((i) => ({
-                id: i.id, severity: i.severity, effort: i.effort, claim: i.claim, fix: i.fix,
-                selector: i.evidence.selector,
-              })),
-            }))]
-          : []),
-      ]);
-      versions.push({ version, composite: v.composite, gatePass: v.gatePass });
-      return version;
+      await handle.finish({ critiques: v.critiques, composite: v.composite, gatePass: v.gatePass, openIssues: v.openIssues, changes: v.changes });
+      return handle.version;
     },
 
     async finalise(m) {

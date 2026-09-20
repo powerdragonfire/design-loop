@@ -453,6 +453,51 @@ const parseFile = async <T>(file: string): Promise<T> => {
   }
 };
 
+/** The chair's raw, unranked answer for a round: a prompt and the change ids it was drawn from. */
+export interface RawChair {
+  prompt: string;
+  changeIds: string[];
+}
+
+const isRawChair = (v: unknown): v is RawChair =>
+  typeof v === "object" && v !== null &&
+  typeof (v as RawChair).prompt === "string" &&
+  Array.isArray((v as RawChair).changeIds);
+
+const chairFile = (runDir: string, version: string, where: "version" | "inbox"): string =>
+  where === "inbox" ? join(runDir, version, "inbox", "chair.json") : join(runDir, version, "chair.json");
+
+/**
+ * Archives the chair's raw answer so a replayed round does not re-pay for it. `chair()`'s ranking and
+ * `MAX_CHANGES` truncation stay pure and are re-applied on every replay rather than stored here.
+ */
+export async function writeChair(runDir: string, version: string, raw: RawChair): Promise<void> {
+  await writeAtomic(chairFile(runDir, version, "version"), json(raw));
+}
+
+/**
+ * The chair's raw answer for a round, or null when it has not answered. Validated on the way out, not
+ * the way in: in agent mode this file is written by a subagent, so it is untrusted input from disk. A
+ * blank prompt would become an empty Stitch edit — a paid API call that asks for nothing.
+ */
+export async function readChair(
+  runDir: string,
+  version: string,
+  where: "version" | "inbox" = "version",
+): Promise<RawChair | null> {
+  const file = chairFile(runDir, version, where);
+  let parsed: unknown;
+  try {
+    parsed = await parseFile<unknown>(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  if (!isRawChair(parsed)) throw new Error(`${file} is not a chair answer`);
+  if (parsed.prompt.trim() === "") throw new Error(`${file} has an empty prompt`);
+  return { prompt: parsed.prompt.trim(), changeIds: parsed.changeIds.map(String) };
+}
+
 /**
  * Reopens a run written by an earlier process, so a person can approve it after reading the report. A
  * `manifest.json` means the run was finalised, and its `versions` list is then authoritative: a stray `vNN`

@@ -44,17 +44,10 @@ const keysOf = (value: unknown): string =>
   value !== null && typeof value === "object" ? Object.keys(value).join(", ") : "";
 
 /**
- * SDK 0.3.5 reads a screen out with
- * `outputComponents.find((c) => c?.design?.screens != null)?.design?.screens?.[0]`
- * (dist/generated/src/screen.js:30, and the same line in project.js). `[] != null` is true, so a progress
- * component carrying an empty `screens` array is chosen over the later component holding the real screen,
- * and a perfectly complete payload throws "Incomplete API response … expected object at projection path".
- *
- * This is the projection the SDK's own `variants()` uses instead, which flattens every component. On a
- * miss it says what did come back, so the next failure is diagnosable rather than opaque — the count and
- * the field names only, never the payload, which carries signed download URLs.
+ * Every screen the response carries. `generate_variants` returns several; `generate_screen_from_text`
+ * and `edit_screens` return one, and `projectScreen` takes the first of these.
  */
-export function projectScreen(raw: unknown, tool: string): ScreenData {
+export function projectScreens(raw: unknown, tool: string): ScreenData[] {
   if (raw === null || typeof raw !== "object") {
     throw new StitchProjectionError(tool, `the response was ${raw === null ? "null" : `a ${typeof raw}`}, not an object with outputComponents`);
   }
@@ -66,15 +59,30 @@ export function projectScreen(raw: unknown, tool: string): ScreenData {
     const design = (c as { design?: { screens?: unknown } } | null)?.design;
     return Array.isArray(design?.screens) ? design.screens : [];
   });
-  const screen = screens.find((s: unknown) => s !== null && typeof s === "object");
-  if (!screen) {
+  const usable = screens.filter((s: unknown): s is ScreenData => s !== null && typeof s === "object");
+  if (usable.length === 0) {
     const shape = components.map((c) => `[${keysOf(c)}]`).join(", ");
     throw new StitchProjectionError(
       tool,
       `${components.length} output component(s) with keys ${shape}; ${screens.length} screens across them`,
     );
   }
-  return screen as ScreenData;
+  return usable;
+}
+
+/**
+ * SDK 0.3.5 reads a screen out with
+ * `outputComponents.find((c) => c?.design?.screens != null)?.design?.screens?.[0]`
+ * (dist/generated/src/screen.js:30, and the same line in project.js). `[] != null` is true, so a progress
+ * component carrying an empty `screens` array is chosen over the later component holding the real screen,
+ * and a perfectly complete payload throws "Incomplete API response … expected object at projection path".
+ *
+ * This is the projection the SDK's own `variants()` uses instead, which flattens every component. On a
+ * miss it says what did come back, so the next failure is diagnosable rather than opaque — the count and
+ * the field names only, never the payload, which carries signed download URLs.
+ */
+export function projectScreen(raw: unknown, tool: string): ScreenData {
+  return projectScreens(raw, tool)[0]!;
 }
 
 /** A screen's id is either given outright or the tail of its resource name (SDK: screen.js:8-18). */

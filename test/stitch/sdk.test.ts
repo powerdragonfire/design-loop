@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createSdkProject, projectScreen, StitchProjectionError } from "../../src/stitch/sdk.js";
+import { createSdkProject, projectScreen, projectScreens, StitchProjectionError } from "../../src/stitch/sdk.js";
 
 /**
  * SDK 0.3.5 projects an edit/generate response with
@@ -48,6 +48,26 @@ describe("projectScreen", () => {
     expect(() => projectScreen({ projectId: "p1" }, "edit_screens")).toThrow(
       /the response was an object with keys \[projectId\], but no outputComponents array/,
     );
+  });
+});
+
+describe("projectScreens", () => {
+  const component = (screens: unknown[]) => ({ design: { screens } });
+
+  it("returns every screen across every component, in order", () => {
+    const raw = { outputComponents: [component([{ id: "a" }]), { text: "working" }, component([{ id: "b" }, { id: "c" }])] };
+    expect(projectScreens(raw, "generate_variants").map((s) => s.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("drops non-object entries rather than returning holes", () => {
+    const raw = { outputComponents: [component([null, { id: "a" }])] };
+    expect(projectScreens(raw, "generate_variants").map((s) => s.id)).toEqual(["a"]);
+  });
+
+  it("throws the same projection error as the singular form when nothing carries a screen", () => {
+    const raw = { outputComponents: [{ text: "still going" }] };
+    expect(() => projectScreens(raw, "generate_variants")).toThrow(StitchProjectionError);
+    expect(() => projectScreens(raw, "generate_variants")).toThrow(/1 output component\(s\)/);
   });
 });
 

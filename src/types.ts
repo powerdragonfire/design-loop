@@ -58,6 +58,8 @@ export interface Config {
     creativeRange: CreativeRange;
     aspects: VariantAspect[];
   };
+  /** Where critiques come from: the Anthropic API, or files written by Claude Code subagents. */
+  criticMode: "api" | "agent";
 }
 
 export interface Contract {

@@ -8,6 +8,7 @@ export interface Calibration {
   criticModel: string;
   weights: Record<string, number>;
   measuredAt: string;
+  criticMode: "api" | "agent";
 }
 
 const WEIGHT_EPSILON = 1e-9;
@@ -24,7 +25,8 @@ const isCalibration = (v: unknown): v is Calibration => {
     typeof c.sigma === "number" && Number.isFinite(c.sigma) &&
     typeof c.criticModel === "string" &&
     typeof c.weights === "object" && c.weights !== null &&
-    typeof c.measuredAt === "string"
+    typeof c.measuredAt === "string" &&
+    (c.criticMode === undefined || c.criticMode === "api" || c.criticMode === "agent")
   );
 };
 
@@ -69,7 +71,16 @@ export async function readCalibration(
     criticModel: parsed.criticModel,
     weights: parsed.weights,
     measuredAt: parsed.measuredAt,
+    // An old calibration predates the field; it can only have been measured through the API.
+    criticMode: parsed.criticMode ?? "api",
   };
+  if (cfg.criticMode !== cal.criticMode) {
+    log?.(
+      `WARNING: sigma was calibrated in ${cal.criticMode} mode but this run uses ${cfg.criticMode} mode. ` +
+        "Tool-using critics score differently, so this run's stopping rule rests on a noise floor that does " +
+        "not describe it. Agent-mode calibration is not implemented yet; treat the stop reason with suspicion.",
+    );
+  }
   if (cfg.models.critic !== cal.criticModel) {
     log?.(
       `WARNING: sigma was calibrated with critic ${cal.criticModel} but this run uses ${cfg.models.critic}; ` +

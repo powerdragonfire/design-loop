@@ -32,6 +32,7 @@ const ConfigSchema = z.strictObject({
       aspects: z.array(z.enum(["LAYOUT", "COLOR_SCHEME", "IMAGES", "TEXT_FONT", "TEXT_CONTENT"])).default([]),
     })
     .default({ families: 1, variantsPerFamily: 0, creativeRange: "EXPLORE", aspects: [] }),
+  criticMode: z.enum(["api", "agent"]).default("api"),
 });
 
 const WEIGHT_EPSILON = 1e-9;

@@ -92,11 +92,16 @@ describe("generateCandidates", () => {
   });
 
   it("skips the variants call entirely when variantsPerFamily is zero", async () => {
+    // The backwards-compatibility guarantee: a design folder that has not opted in must get exactly
+    // one generation and no variants calls, proved directly on the generate spy, not just on the
+    // output length.
+    const generate = vi.fn(async () => screenStub("s"));
     const variants = vi.fn(async () => []);
     const out = await generateCandidates({
-      contract, screen: "home", designDir: dir, generator: { generate: async () => screenStub("s"), variants } as any,
+      contract, screen: "home", designDir: dir, generator: { generate, variants } as any,
       cfg: cfg({ families: 1, variantsPerFamily: 0 }), progress: noProgress,
     });
+    expect(generate).toHaveBeenCalledTimes(1);
     expect(variants).not.toHaveBeenCalled();
     expect(out).toHaveLength(1);
   });
@@ -108,5 +113,26 @@ describe("generateCandidates", () => {
       cfg: cfg({ families: 1, variantsPerFamily: 2 }), progress: noProgress,
     });
     expect(out.map((c) => c.id)).toEqual(["c0"]);
+  });
+
+  it("keeps the seed when a family's variants call rejects with a non-Error value", async () => {
+    // A rejection that isn't an Error (a thrown string, or an object with no .message) must not
+    // throw again from inside the catch itself, which would lose the seed the catch exists to save.
+    const variants = vi.fn(async () => { throw "boom"; });
+    const out = await generateCandidates({
+      contract, screen: "home", designDir: dir, generator: { generate: async () => screenStub("s"), variants } as any,
+      cfg: cfg({ families: 1, variantsPerFamily: 2 }), progress: noProgress,
+    });
+    expect(out.map((c) => c.id)).toEqual(["c0"]);
+  });
+
+  it("propagates a failed seed rather than skipping the family, and never attempts its variants", async () => {
+    const variants = vi.fn(async () => []);
+    await expect(generateCandidates({
+      contract, screen: "home", designDir: dir,
+      generator: { generate: async () => { throw new Error("503 from Stitch"); }, variants } as any,
+      cfg: cfg({ families: 1, variantsPerFamily: 2 }), progress: noProgress,
+    })).rejects.toThrow("503 from Stitch");
+    expect(variants).not.toHaveBeenCalled();
   });
 });

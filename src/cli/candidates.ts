@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { buildFirstPrompt } from "./prompt.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
 import type { Config, Contract } from "../types.js";
-import type { Progress } from "./progress.js";
+import { errorText, type Progress } from "./progress.js";
 
 /**
  * The art directions a run fans out over, one per `## ` heading of `directions.md`. The prose under a
@@ -61,16 +61,20 @@ export async function generateCandidates(opts: GenerateOptions): Promise<Candida
     const seed = await progress.phase(`stitch generate ${family + 1}/${families}`, () => generator.generate(prompt));
     out.push({ id: `c${out.length}`, family, prompt, handle: seed });
     if (variantsPerFamily === 0) continue;
+
+    // The try wraps only the call, not the push loop below: a bug in the loop must surface as
+    // itself, not be swallowed as an indistinguishable "variants failed" warning.
+    let made: Screen[] | null = null;
     try {
-      const made = await progress.phase(
+      made = await progress.phase(
         `stitch variants ${family + 1}/${families}`,
         () => generator.variants(seed, prompt, { variantCount: variantsPerFamily, creativeRange, aspects }),
         (v) => `${v.length} variant${v.length === 1 ? "" : "s"}`,
       );
-      for (const handle of made) out.push({ id: `c${out.length}`, family, prompt, handle });
     } catch (err) {
-      progress.warn(`family ${family + 1} variants failed, keeping its seed: ${(err as Error).message.split("\n")[0]}`);
+      progress.warn(`family ${family + 1} variants failed, keeping its seed: ${errorText(err)}`);
     }
+    if (made) for (const handle of made) out.push({ id: `c${out.length}`, family, prompt, handle });
   }
   return out;
 }

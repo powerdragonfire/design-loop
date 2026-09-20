@@ -82,7 +82,7 @@ export const oneLine = (text: string, max = 140): string => {
   const first = text.split("\n")[0]!.trim();
   return first.length > max ? `${first.slice(0, max - 1)}…` : first;
 };
-const errorText = (err: unknown): string => oneLine(err instanceof Error ? err.message : String(err));
+export const errorText = (err: unknown): string => oneLine(err instanceof Error ? err.message : String(err));
 
 /**
  * The prompt about to go to Stitch, as sub-lines under the step that sends it — two spaces, the same

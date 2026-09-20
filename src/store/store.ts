@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import type { Critique, Issue, MeasuredDoc } from "../types.js";
@@ -44,6 +44,34 @@ export interface VersionInput {
   changes?: { requested: number; applied: Issue[] };
 }
 
+/** The payload every screen directory holds, whether it lands under a run's root (a version) or under `candidates/`. */
+type ScreenPayload = Omit<VersionInput, "index" | "parent" | "changes">;
+
+/**
+ * The same payload a version takes, keyed by a candidate id instead of a round index. Keeping the shape
+ * identical to `ScreenPayload` is what makes `promoteCandidate` a plain recursive copy: a candidate and
+ * the version it becomes are, on disk, the same directory.
+ */
+export interface CandidateInput extends ScreenPayload {
+  id: string;
+  family: number;
+}
+
+/** A summary of one scored candidate, enough to render a selection without re-reading every candidate directory. */
+export interface CandidateSummary {
+  id: string;
+  family: number;
+  composite: number;
+  blockers: number;
+  gatePass: boolean;
+  failed?: string;
+}
+
+export interface SelectionInput {
+  winner: string;
+  rows: CandidateSummary[];
+}
+
 export interface Finalisation {
   /** "aborted" is a run cut short by a Stitch, quota or chair failure; every version already written is kept (spec §14). */
   stopReason: StopReason | "aborted";
@@ -67,8 +95,15 @@ export interface Run {
   dir: string;
   /** Returns the version directory name, e.g. "v00". */
   writeVersion(v: VersionInput): Promise<string>;
+  /** Writes `candidates/<id>/`. Returns the candidate id. */
+  writeCandidate(c: CandidateInput): Promise<string>;
+  /** Writes `candidates/selection.json`, the record of which candidate won and why. */
+  writeSelection(s: SelectionInput): Promise<void>;
+  /** Copies `candidates/<id>/` to `v00/` and registers it as a version. Returns `"v00"`. */
+  promoteCandidate(id: string): Promise<string>;
   finalise(m: Finalisation): Promise<void>;
-  approve(version: string): Promise<void>;
+  /** Accepts a version id (`vNN`) or a written candidate id (`cN`). */
+  approve(id: string): Promise<void>;
 }
 
 interface VersionSummary {
@@ -102,11 +137,40 @@ export async function writeAtomic(file: string, content: string): Promise<void> 
 
 type Manifest = Record<string, unknown> & { committeeRank: string[] };
 
+/**
+ * Writes the directory layout shared by every version and candidate: `screen.png`, `screen.html`,
+ * `digest.json`, `composite.json`, `prompt.txt`, `open-issues.json` and one file per critique. A version
+ * and a candidate hold identical payloads, so this is the only place that layout is spelled out — if
+ * `writeVersion` and `writeCandidate` ever wrote it differently, `promoteCandidate`'s plain recursive
+ * copy would silently produce a malformed version directory.
+ */
+async function writeScreenDir(base: string, p: ScreenPayload): Promise<void> {
+  try {
+    await mkdir(base);
+  } catch (err) {
+    if (isExists(err)) throw new Error(`${basename(base)} already exists`);
+    throw err;
+  }
+  await mkdir(join(base, "critiques"));
+  await Promise.all([
+    writeFile(join(base, "screen.png"), p.png),
+    writeFile(join(base, "screen.html"), p.html),
+    writeFile(join(base, "digest.json"), json(p.doc)),
+    writeFile(join(base, "composite.json"), json({ composite: p.composite, gatePass: p.gatePass })),
+    writeFile(join(base, "prompt.txt"), p.prompt),
+    writeFile(join(base, "open-issues.json"), json(p.openIssues)),
+    ...p.critiques.map((c) => writeFile(join(base, "critiques", `${c.critic}.json`), json(c))),
+  ]);
+}
+
 /** Builds a Run over `dir` from what is already known; `openRun` starts empty, `openExistingRun` rebuilds. */
 function makeRun(dir: string, screen: string, date: string, versions: VersionSummary[], existing: Manifest | null): Run {
   let manifest = existing;
   const manifestFile = join(dir, "manifest.json");
   const written = (version: string): boolean => versions.some((s) => s.version === version);
+  // Populated as writeCandidate runs, so approve can recognise a candidate id without it ever
+  // appearing in `versions` — that list stays reserved for what finalise's committeeRank checks against.
+  const candidateIds: string[] = [];
 
   return {
     dir,
@@ -124,21 +188,8 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
 
       const version = `v${String(v.index).padStart(2, "0")}`;
       const base = join(dir, version);
-      try {
-        await mkdir(base);
-      } catch (err) {
-        if (isExists(err)) throw new Error(`version ${version} already exists`);
-        throw err;
-      }
-      await mkdir(join(base, "critiques"));
+      await writeScreenDir(base, v);
       await Promise.all([
-        writeFile(join(base, "screen.png"), v.png),
-        writeFile(join(base, "screen.html"), v.html),
-        writeFile(join(base, "digest.json"), json(v.doc)),
-        writeFile(join(base, "composite.json"), json({ composite: v.composite, gatePass: v.gatePass })),
-        writeFile(join(base, "prompt.txt"), v.prompt),
-        writeFile(join(base, "open-issues.json"), json(v.openIssues)),
-        ...v.critiques.map((c) => writeFile(join(base, "critiques", `${c.critic}.json`), json(c))),
         ...(v.parent != null ? [writeFile(join(base, "parent.txt"), v.parent)] : []),
         ...(v.changes
           ? [writeFile(join(base, "changes.json"), json({
@@ -152,6 +203,38 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
       ]);
       versions.push({ version, composite: v.composite, gatePass: v.gatePass });
       return version;
+    },
+
+    async writeCandidate(c) {
+      assertSegment("candidate id", c.id);
+      // candidates/ may not exist yet on the first candidate of a run; writeScreenDir's mkdir(base)
+      // is deliberately non-recursive so it still catches a genuine re-write of the same id.
+      await mkdir(join(dir, "candidates"), { recursive: true });
+      const base = join(dir, "candidates", c.id);
+      await writeScreenDir(base, c);
+      await writeAtomic(join(base, "family.txt"), String(c.family));
+      candidateIds.push(c.id);
+      return c.id;
+    },
+
+    async writeSelection(s) {
+      await mkdir(join(dir, "candidates"), { recursive: true });
+      await writeAtomic(join(dir, "candidates", "selection.json"), json(s));
+    },
+
+    /**
+     * Copies rather than moves: `v00` must stay a complete version directory so `report`, `approve` and
+     * the stop rule need no knowledge of candidates, and the candidate must stay readable in the
+     * gallery. Registering `v00` in `versions` (not just writing it to disk) is what lets `finalise`
+     * validate a committeeRank that names it and `approve("v00")` find it afterwards.
+     */
+    async promoteCandidate(id) {
+      assertSegment("candidate id", id);
+      const src = join(dir, "candidates", id);
+      const summary = await parseFile<{ composite: number; gatePass: boolean }>(join(src, "composite.json"));
+      await cp(src, join(dir, "v00"), { recursive: true });
+      versions.push({ version: "v00", composite: summary.composite, gatePass: summary.gatePass });
+      return "v00";
     },
 
     async finalise(m) {
@@ -178,18 +261,26 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
       manifest = next;
     },
 
-    async approve(version) {
+    async approve(id) {
+      assertSegment("id", id);
+      // A candidate is approvable before the run is ever finalised - approving one is choosing which
+      // candidate becomes v00, not reviewing a finished round - so it skips the manifest entirely and
+      // never touches humanPick.
+      if (candidateIds.includes(id)) {
+        await writeAtomic(join(dir, "candidates", id, "approved.json"), json({ approved: id, at: new Date().toISOString() }));
+        return;
+      }
       if (!manifest) throw new Error("run is not finalised: finalise it before approving a version");
-      if (!written(version)) throw new Error(`no such version ${version}`);
+      if (!written(id)) throw new Error(`no such version ${id}`);
       // The manifest's humanPick is the only ground truth, so it must never lag the approval: write the new
       // approval, then the manifest, and only then clear the old approvals. A failure in between leaves at worst
       // a stale second approved.json, which a retry clears; readers treat manifest.humanPick as authoritative.
-      await writeAtomic(join(dir, version, "approved.json"), json({ version, approvedAt: new Date().toISOString() }));
-      const next = { ...manifest, humanPick: version, agreedWithTop: version === manifest.committeeRank[0] };
+      await writeAtomic(join(dir, id, "approved.json"), json({ version: id, approvedAt: new Date().toISOString() }));
+      const next = { ...manifest, humanPick: id, agreedWithTop: id === manifest.committeeRank[0] };
       await writeAtomic(manifestFile, json(next));
       manifest = next;
       await Promise.all(
-        versions.filter((s) => s.version !== version).map((s) => rm(join(dir, s.version, "approved.json"), { force: true })),
+        versions.filter((s) => s.version !== id).map((s) => rm(join(dir, s.version, "approved.json"), { force: true })),
       );
     },
   };

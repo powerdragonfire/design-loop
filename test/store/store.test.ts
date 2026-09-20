@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openRun, openExistingRun } from "../../src/store/store.js";
@@ -182,6 +183,37 @@ describe("store", () => {
     expect(m.stopReason).toBe("aborted");
     expect(m.abortReason).toBe("Stitch quota exhausted");
     expect(m.best).toBe("v00");
+  });
+
+  const doc = { viewport: { w: 393, h: 852 }, nodes: [] };
+  const critiques: never[] = [];
+
+  it("writes a candidate directory with its critiques and prompt", async () => {
+    const run = await openRun(dir, "home", "2026-09-20");
+    const name = await run.writeCandidate({ id: "c0", family: 0, png: Buffer.from("p"), html: "<p/>", doc, critiques, composite: 80, gatePass: false, prompt: "P", openIssues: [] });
+    expect(name).toBe("c0");
+    expect(await readFile(join(run.dir, "candidates/c0/prompt.txt"), "utf8")).toBe("P");
+    expect(await readFile(join(run.dir, "candidates/c0/family.txt"), "utf8")).toBe("0");
+  });
+
+  it("promotes a candidate to v00 by copying it, leaving the candidate in place", async () => {
+    const run = await openRun(dir, "home", "2026-09-20");
+    await run.writeCandidate({ id: "c1", family: 0, png: Buffer.from("png-bytes"), html: "<p/>", doc, critiques, composite: 80, gatePass: true, prompt: "P", openIssues: [] });
+    expect(await run.promoteCandidate("c1")).toBe("v00");
+    expect(await readFile(join(run.dir, "v00/screen.png"))).toEqual(Buffer.from("png-bytes"));
+    expect(await readFile(join(run.dir, "candidates/c1/screen.png"))).toEqual(Buffer.from("png-bytes"));
+  });
+
+  it("approves a candidate id as readily as a version id", async () => {
+    const run = await openRun(dir, "home", "2026-09-20");
+    await run.writeCandidate({ id: "c2", family: 1, png: Buffer.from("p"), html: "<p/>", doc, critiques, composite: 80, gatePass: false, prompt: "P", openIssues: [] });
+    await run.approve("c2");
+    expect(JSON.parse(await readFile(join(run.dir, "candidates/c2/approved.json"), "utf8")).approved).toBe("c2");
+  });
+
+  it("refuses an id that could escape the run directory", async () => {
+    const run = await openRun(dir, "home", "2026-09-20");
+    await expect(run.promoteCandidate("../escape")).rejects.toThrow(/becomes part of a directory name/);
   });
 });
 

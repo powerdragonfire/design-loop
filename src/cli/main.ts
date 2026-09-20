@@ -11,7 +11,7 @@ import { AnthropicLlmClient, type LlmClient } from "../critics/llm.js";
 import { buildReport, captureApproval } from "../report/report.js";
 import { createStitchGenerator, type Generator } from "../stitch/adapter.js";
 import { abDistiller, calibrate } from "./calibrate.js";
-import { createProgress, noProgress, type Progress, type ProgressMode } from "./progress.js";
+import { createProgress, noProgress, promptLines, type Progress, type ProgressMode } from "./progress.js";
 import { runScreen } from "./run.js";
 import { isSkipped, smoke } from "./smoke.js";
 
@@ -65,7 +65,7 @@ class UsageError extends Error {}
 const FAILED_AUTH = new Set([401, 403]);
 
 /** Production wiring: the real modules, for the design folder in use. Every field is replaceable in tests. */
-export function defaultDeps(designDir: string, io: Io, progress: Progress = noProgress): Deps {
+export function defaultDeps(designDir: string, io: Io, progress: Progress = noProgress, mode: ProgressMode = "normal"): Deps {
   return {
     runScreen,
     buildReport,
@@ -77,6 +77,9 @@ export function defaultDeps(designDir: string, io: Io, progress: Progress = noPr
       createStitchGenerator({
         quotaDir: designDir,
         onRetry: (r) => progress.warn(`stitch ${r.what} failed, attempt ${r.attempt} of ${r.of} in ${r.waitMs / 1000}s: ${r.error.split("\n")[0]!.slice(0, 100)}`),
+        // What was asked for, not only what came back: a generation is slow and expensive, and the prompt
+        // is the one input worth seeing while waiting on it.
+        onPrompt: (pr) => { for (const line of promptLines(pr.what, pr.prompt, mode)) progress.info(line); },
       }),
     makeLlm: () => new AnthropicLlmClient(),
     makeChair: () => new AnthropicChairClient(),
@@ -239,8 +242,9 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
 
     if (values.quiet && values.verbose) throw new UsageError("--quiet and --verbose cannot be used together");
     const designDir = values.design ?? "design";
-    progress = io.makeProgress?.(values.quiet ? "quiet" : values.verbose ? "verbose" : "normal") ?? noProgress;
-    const d: Deps = { ...defaultDeps(designDir, io, progress), ...overrides };
+    const mode: ProgressMode = values.quiet ? "quiet" : values.verbose ? "verbose" : "normal";
+    progress = io.makeProgress?.(mode) ?? noProgress;
+    const d: Deps = { ...defaultDeps(designDir, io, progress, mode), ...overrides };
 
     switch (command) {
       case "run": {

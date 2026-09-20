@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { committeeHooks, createProgress, formatDuration, formatStatus, noProgress, type ProgressOptions } from "../../src/cli/progress.js";
+import { committeeHooks, createProgress, formatDuration, formatStatus, noProgress, promptLines, type ProgressOptions } from "../../src/cli/progress.js";
 
 const ESC = "\x1b[";
 let out: string[];
@@ -258,5 +258,48 @@ describe("committeeHooks", () => {
     expect(lines()[0]).toMatch(/ {2}✓ typography\s+71  0:12$/);
     expect(lines()[1]).toMatch(/ {2}✗ feasibility\s+dropped: bad json$/);
     expect(committeeHooks(p, false).onCritic).toBeUndefined();
+  });
+});
+
+describe("promptLines", () => {
+  const SHORT = "a simple mobile login screen";
+  const LONG = `Conker\n\nA mobile voice-dubbing game.\n\nDesign tokens (use these exact values):\n{ "bg": "#0B0B0F" }`;
+
+  it("shows a short prompt on one indented line, under the step it belongs to", () => {
+    expect(promptLines("generate", SHORT, "normal")).toEqual([`  → generate: ${SHORT}`]);
+    expect(promptLines("edit", "make the button larger", "normal")).toEqual(["  → edit: make the button larger"]);
+  });
+
+  it("keeps a long prompt to its first line, truncated, when not verbose", () => {
+    const [line] = promptLines("generate", LONG, "normal");
+    expect(line).toBe("  → generate: Conker");
+    expect(promptLines("generate", "x".repeat(200), "normal")[0]!.length).toBeLessThan(160);
+    expect(promptLines("generate", "x".repeat(200), "normal")[0]).toMatch(/…$/);
+  });
+
+  it("expands the whole prompt under --verbose, one call per line", () => {
+    expect(promptLines("generate", LONG, "verbose")).toEqual([
+      "  → generate:",
+      "    Conker",
+      "    ",
+      "    A mobile voice-dubbing game.",
+      "    ",
+      "    Design tokens (use these exact values):",
+      '    { "bg": "#0B0B0F" }',
+    ]);
+  });
+
+  // Expanding a prompt that already fits would only add a line saying nothing.
+  it("leaves a prompt that already fits on one line alone, even under --verbose", () => {
+    expect(promptLines("generate", SHORT, "verbose")).toEqual([`  → generate: ${SHORT}`]);
+  });
+
+  // `info` suppresses these in quiet mode, but the JSONL event log records them either way, which is the
+  // whole point of the log on a paid run.
+  it("formats in quiet mode as it does in normal, and lets the reporter do the suppressing", () => {
+    expect(promptLines("generate", SHORT, "quiet")).toEqual(promptLines("generate", SHORT, "normal"));
+    const p = createProgress({ write: (x) => out.push(x), tty: false, mode: "quiet" });
+    for (const line of promptLines("generate", SHORT, "quiet")) p.info(line);
+    expect(out).toEqual([]);
   });
 });

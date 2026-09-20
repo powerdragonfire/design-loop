@@ -78,11 +78,26 @@ export function formatDuration(ms: number): string {
 }
 
 /** First line only, and short: a long error is printed in full where it is finally reported. */
-const oneLine = (text: string, max = 140): string => {
+export const oneLine = (text: string, max = 140): string => {
   const first = text.split("\n")[0]!.trim();
   return first.length > max ? `${first.slice(0, max - 1)}…` : first;
 };
 const errorText = (err: unknown): string => oneLine(err instanceof Error ? err.message : String(err));
+
+/**
+ * The prompt about to go to Stitch, as sub-lines under the step that sends it — two spaces, the same
+ * convention `committeeHooks` uses for its per-critic lines.
+ *
+ * A run's first prompt is a brief plus the whole token table, so only `--verbose` prints it in full, and
+ * only when one line would actually lose something. Quiet formats like normal: `info` drops the lines, but
+ * the JSONL event log keeps them, which is what makes a paid run answerable after the terminal is gone.
+ */
+export function promptLines(what: string, prompt: string, mode: ProgressMode): string[] {
+  const text = prompt.trim();
+  const short = oneLine(text);
+  if (mode !== "verbose" || short === text) return [`  → ${what}: ${short}`];
+  return [`  → ${what}:`, ...text.split("\n").map((line) => `    ${line}`)];
+}
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BAR_WIDTH = 16;

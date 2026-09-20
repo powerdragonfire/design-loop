@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeGenerator, StitchGenerator } from "../../src/stitch/adapter.js";
+import { StitchProjectionError } from "../../src/stitch/sdk.js";
 import { readQuota, reserve, MONTHLY_LIMIT } from "../../src/stitch/quota.js";
 
 describe("FakeGenerator", () => {
@@ -228,5 +229,38 @@ describe("StitchGenerator", () => {
     await expect(s.getHtml()).rejects.toThrow(/503/);
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(sleeps).toEqual([1000, 4000]);
+  });
+  // edit_screens documents "DO NOT RETRY", and a projection miss usually means the edit did happen
+  // server-side: retrying spends quota making screens nobody asked for. The live smoke run burned 2:54
+  // and two extra generations this way before failing anyway.
+  it("does not retry a projection failure, and never says it is retrying one", async () => {
+    const generate = vi.fn(async () => { throw new StitchProjectionError("edit_screens", "0 screens across them"); });
+    const seen: unknown[] = [];
+    const { gen, sleeps } = make({ generate }, { onRetry: (r: unknown) => seen.push(r) });
+    await expect(gen.generate("go")).rejects.toThrow("edit_screens returned no screen: 0 screens across them");
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+
+  describe("onPrompt", () => {
+    it("reports what is about to be sent, for a generate and for an edit", async () => {
+      const seen: unknown[] = [];
+      const { gen } = make({ generate: vi.fn(async () => sdkScreen()) }, { onPrompt: (p: unknown) => seen.push(p) });
+      await (await gen.generate("a simple mobile login screen")).edit("make the button larger");
+      expect(seen).toEqual([
+        { what: "generate", prompt: "a simple mobile login screen" },
+        { what: "edit", prompt: "make the button larger" },
+      ]);
+    });
+
+    // Fires before the reservation, so an exhausted quota still says what it refused to send.
+    it("reports the prompt even when the quota refuses the call", async () => {
+      await reserve(dir, MONTHLY_LIMIT);
+      const seen: unknown[] = [];
+      const { gen } = make({ generate: vi.fn() }, { onPrompt: (p: unknown) => seen.push(p) });
+      await expect(gen.generate("go")).rejects.toThrow(/quota/i);
+      expect(seen).toEqual([{ what: "generate", prompt: "go" }]);
+    });
   });
 });

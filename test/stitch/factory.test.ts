@@ -3,12 +3,13 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const project = vi.fn((id: string) => ({
-  generate: vi.fn(async () => ({
-    id: `${id}-s1`, edit: vi.fn(), getHtml: async () => "", getImage: async () => "",
-  })),
+// The adapter talks to the MCP tools directly (src/stitch/sdk.ts), so the seam to mock is callTool.
+const callTool = vi.fn(async (_name: string, args: Record<string, any>) => ({
+  outputComponents: [{ design: { screens: [{ id: `${args.projectId}-s1` }] } }],
 }));
-vi.mock("@google/stitch-sdk", () => ({ stitch: { project: (id: string) => project(id) } }));
+vi.mock("@google/stitch-sdk", () => ({
+  stitch: { callTool: (name: string, args: Record<string, any>) => callTool(name, args) },
+}));
 
 const { createStitchGenerator } = await import("../../src/stitch/adapter.js");
 
@@ -17,7 +18,7 @@ const setEnv = (env: Record<string, string>) => {
   for (const name of AUTH_VARS) vi.stubEnv(name, env[name] ?? "");
 };
 
-afterEach(() => { vi.unstubAllEnvs(); project.mockClear(); });
+afterEach(() => { vi.unstubAllEnvs(); callTool.mockClear(); });
 
 describe("createStitchGenerator", () => {
   const quotaDir = () => mkdtempSync(join(tmpdir(), "dl-"));
@@ -25,7 +26,7 @@ describe("createStitchGenerator", () => {
   it("names STITCH_PROJECT_ID when it is missing", () => {
     setEnv({ STITCH_API_KEY: "k" });
     expect(() => createStitchGenerator({ quotaDir: quotaDir() })).toThrow(/STITCH_PROJECT_ID/);
-    expect(project).not.toHaveBeenCalled();
+    expect(callTool).not.toHaveBeenCalled();
   });
 
   it("names both accepted auth routes when there is no auth at all, and never prints a secret", () => {
@@ -34,7 +35,7 @@ describe("createStitchGenerator", () => {
     expect(err?.message).toMatch(/STITCH_API_KEY/);
     expect(err?.message).toMatch(/STITCH_ACCESS_TOKEN/);
     expect(err?.message).toMatch(/GOOGLE_CLOUD_PROJECT/);
-    expect(project).not.toHaveBeenCalled();
+    expect(callTool).not.toHaveBeenCalled();
   });
 
   it("names the missing half of the OAuth route without echoing the token", () => {
@@ -47,14 +48,17 @@ describe("createStitchGenerator", () => {
   it("wires the project named by STITCH_PROJECT_ID on the API-key route", async () => {
     setEnv({ STITCH_PROJECT_ID: "p1", STITCH_API_KEY: "k" });
     const gen = createStitchGenerator({ quotaDir: quotaDir() });
-    expect(project).toHaveBeenCalledWith("p1");
     expect((await gen.generate("go")).id).toBe("p1-s1");
+    expect(callTool).toHaveBeenCalledWith(
+      "generate_screen_from_text",
+      expect.objectContaining({ projectId: "p1", prompt: "go", deviceType: "MOBILE" }),
+    );
   });
 
   it("accepts the OAuth route: access token plus GCP project, no API key", async () => {
     setEnv({ STITCH_PROJECT_ID: "p1", STITCH_ACCESS_TOKEN: "t", GOOGLE_CLOUD_PROJECT: "gcp" });
     const gen = createStitchGenerator({ quotaDir: quotaDir() });
-    expect(project).toHaveBeenCalledWith("p1");
     expect((await gen.generate("go")).id).toBe("p1-s1");
+    expect(callTool).toHaveBeenCalledWith("generate_screen_from_text", expect.objectContaining({ projectId: "p1" }));
   });
 });

@@ -1,5 +1,7 @@
-import { stitch } from "@google/stitch-sdk";
 import { reserve } from "./quota.js";
+import { createSdkProject, StitchProjectionError, type DeviceType, type ModelId, type SdkProject, type SdkScreen } from "./sdk.js";
+
+export type { DeviceType, ModelId, SdkProject, SdkScreen };
 
 export interface Screen {
   id: string;
@@ -10,24 +12,6 @@ export interface Screen {
 
 export interface Generator {
   generate(prompt: string): Promise<Screen>;
-}
-
-type DeviceType = "DEVICE_TYPE_UNSPECIFIED" | "MOBILE" | "DESKTOP" | "TABLET" | "AGNOSTIC";
-type ModelId = "MODEL_ID_UNSPECIFIED" | "GEMINI_3_PRO" | "GEMINI_3_FLASH" | "GEMINI_3_1_PRO";
-
-/**
- * The slice of @google/stitch-sdk's Screen and Project that this adapter uses. In SDK 0.3.5 `getHtml()` and
- * `getImage()` resolve to DOWNLOAD URLs (or "" when the response lacks one), not content.
- */
-export interface SdkScreen {
-  id: string;
-  edit(prompt: string, deviceType?: DeviceType, modelId?: ModelId): Promise<SdkScreen>;
-  getHtml(): Promise<string>;
-  getImage(): Promise<string>;
-}
-
-export interface SdkProject {
-  generate(prompt: string, deviceType?: DeviceType, modelId?: ModelId): Promise<SdkScreen>;
 }
 
 export interface FetchResponse {
@@ -50,6 +34,8 @@ export interface StitchGeneratorOptions {
   deviceType?: DeviceType;
   /** Told before each wait between attempts, so a person watching sees a retry instead of a silent stall. */
   onRetry?: (info: { what: string; attempt: number; of: number; waitMs: number; error: string }) => void;
+  /** Told the prompt before it is sent, so a run shows what it asked Stitch for and not only what came back. */
+  onPrompt?: (info: { what: string; prompt: string }) => void;
 }
 
 /** Waits before the 2nd and 3rd attempt. */
@@ -68,6 +54,13 @@ class DownloadError extends Error {
  * A 4xx will not change on retry (expired or forbidden URL), except 408 and 429, which say "try again". A 5xx or a
  * network failure, including a reset mid-body, might clear too.
  */
+/**
+ * A projection failure is the one error that must not be retried: `edit_screens` documents "DO NOT RETRY",
+ * and a miss usually means the edit already happened server-side, so another attempt spends quota to make
+ * screens nobody asked for. Everything else — a reset, a 5xx, a timeout — still gets its three tries.
+ */
+const retryableCall = (err: unknown): boolean => !(err instanceof StitchProjectionError);
+
 const retryableDownload = (err: unknown): boolean =>
   !(err instanceof DownloadError && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429);
 
@@ -89,6 +82,7 @@ export class StitchGenerator implements Generator {
   private readonly modelId: ModelId | undefined;
   private readonly deviceType: DeviceType;
   private readonly onRetry: StitchGeneratorOptions["onRetry"];
+  private readonly onPrompt: StitchGeneratorOptions["onPrompt"];
 
   constructor(opts: StitchGeneratorOptions) {
     this.project = opts.project;
@@ -98,19 +92,23 @@ export class StitchGenerator implements Generator {
     this.modelId = opts.modelId;
     this.deviceType = opts.deviceType ?? "MOBILE";
     this.onRetry = opts.onRetry;
+    this.onPrompt = opts.onPrompt;
   }
 
   async generate(prompt: string): Promise<Screen> {
-    return this.spend("generate", () => this.project.generate(prompt, this.deviceType, this.modelId));
+    return this.spend("generate", prompt, () => this.project.generate(prompt, this.deviceType, this.modelId));
   }
 
   /**
    * Reserves quota ONCE, before the first attempt: a retry then never double-counts, and an exhausted quota never
    * reaches the SDK. The last error is rethrown once the attempts run out; the reservation stays spent.
+   *
+   * The prompt is announced before the reservation, so a refusal still says what it would have sent.
    */
-  private async spend(what: string, call: () => Promise<SdkScreen>): Promise<Screen> {
+  private async spend(what: string, prompt: string, call: () => Promise<SdkScreen>): Promise<Screen> {
+    this.onPrompt?.({ what, prompt });
     await reserve(this.quotaDir, 1);
-    return this.wrap(await this.retry(what, call));
+    return this.wrap(await this.retry(what, call, retryableCall));
   }
 
   private async retry<T>(what: string, fn: () => Promise<T>, shouldRetry: (err: unknown) => boolean = () => true): Promise<T> {
@@ -131,7 +129,7 @@ export class StitchGenerator implements Generator {
   private wrap(inner: SdkScreen): Screen {
     return {
       id: inner.id,
-      edit: (prompt) => this.spend("edit", () => inner.edit(prompt, this.deviceType, this.modelId)),
+      edit: (prompt) => this.spend("edit", prompt, () => inner.edit(prompt, this.deviceType, this.modelId)),
       getHtml: () => this.download(inner, "HTML", () => inner.getHtml(), (res) => res.text()),
       getImage: async () => {
         const png = await this.download(inner, "image", () => inner.getImage(), async (res) =>
@@ -191,7 +189,7 @@ export function createStitchGenerator(opts: Omit<StitchGeneratorOptions, "projec
     const missing = env.STITCH_ACCESS_TOKEN ? "GOOGLE_CLOUD_PROJECT" : "STITCH_ACCESS_TOKEN";
     throw new Error(`${missing} is not set; the OAuth route needs both STITCH_ACCESS_TOKEN and GOOGLE_CLOUD_PROJECT (or set STITCH_API_KEY)`);
   }
-  return new StitchGenerator({ ...opts, project: stitch.project(projectId) });
+  return new StitchGenerator({ ...opts, project: createSdkProject(projectId) });
 }
 
 export interface FakeScreenSpec {

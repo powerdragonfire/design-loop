@@ -21,6 +21,17 @@ const ConfigSchema = z.strictObject({
     feasibility: z.number().nonnegative(),
   }),
   batchMode: z.boolean(),
+  // variantCount at the Stitch API is capped 1-5, so variantsPerFamily is 0-5 (0 meaning
+  // "no extra variants" — just the family seed). Absent entirely, this defaults to that
+  // no-op shape so an unopted-in design folder behaves exactly as it did pre-candidates.
+  candidates: z
+    .strictObject({
+      families: z.number().int().min(1).default(1),
+      variantsPerFamily: z.number().int().min(0).max(5).default(0),
+      creativeRange: z.enum(["REFINE", "EXPLORE", "REIMAGINE"]).default("EXPLORE"),
+      aspects: z.array(z.enum(["LAYOUT", "COLOR_SCHEME", "IMAGES", "TEXT_FONT", "TEXT_CONTENT"])).default([]),
+    })
+    .default({ families: 1, variantsPerFamily: 0, creativeRange: "EXPLORE", aspects: [] }),
 });
 
 const WEIGHT_EPSILON = 1e-9;

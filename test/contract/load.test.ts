@@ -38,6 +38,28 @@ describe("loadContract", () => {
       .rejects.toThrow(/batchMode is not implemented in v1/);
   });
 
+  it("defaults the candidates block to today's single generation", async () => {
+    const { config } = await loadContract(FIX);
+    expect(config.candidates).toEqual({ families: 1, variantsPerFamily: 0, creativeRange: "EXPLORE", aspects: [] });
+  });
+
+  it("accepts a candidates block and keeps its values", async () => {
+    const { config } = await loadContract(FIX, {
+      candidates: { families: 2, variantsPerFamily: 2, creativeRange: "REIMAGINE", aspects: ["LAYOUT", "COLOR_SCHEME"] },
+    } as never);
+    expect(config.candidates.variantsPerFamily).toBe(2);
+  });
+
+  it("refuses more than five variants per family, Stitch's own cap", async () => {
+    await expect(loadContract(FIX, { candidates: { variantsPerFamily: 6 } } as never))
+      .rejects.toThrow(/candidates.variantsPerFamily/);
+  });
+
+  it("refuses a creativeRange Stitch does not accept", async () => {
+    await expect(loadContract(FIX, { candidates: { creativeRange: "WILD" } } as never))
+      .rejects.toThrow(/candidates.creativeRange/);
+  });
+
   describe("malformed tokens.json", () => {
     const tmpDirs: string[] = [];
 

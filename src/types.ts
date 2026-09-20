@@ -1,3 +1,7 @@
+// Re-exported from the Stitch SDK layer (not restated here) so the variant vocabulary
+// stays single-sourced; stitch/ has no dependency back on this file, so this is not a cycle.
+import type { CreativeRange, VariantAspect } from "./stitch/sdk.js";
+
 export type Severity = "blocker" | "major" | "minor";
 export type Effort = "low" | "medium" | "high";
 export type CriticName =
@@ -44,6 +48,14 @@ export interface Config {
   models: { critic: string; chair: string };
   weights: Record<CriticName, number>;
   batchMode: boolean;
+  // First-round variant generation. A design folder that never opts in loads with
+  // families: 1, variantsPerFamily: 0 — today's single-generation behavior, unchanged.
+  candidates: {
+    families: number;
+    variantsPerFamily: number;
+    creativeRange: CreativeRange;
+    aspects: VariantAspect[];
+  };
 }
 
 export interface Contract {

@@ -110,6 +110,35 @@ describe("StitchGenerator", () => {
     expect((await readQuota(dir)).used).toBe(3); // 1 seed + 2 variants
   });
 
+  it("never calls the SDK's variants when the quota is exhausted", async () => {
+    const variants = vi.fn(async () => [sdkScreen({ id: "v1" })]);
+    await reserve(dir, MONTHLY_LIMIT);
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()), variants });
+    const seed: any = { id: "s1" };
+    await expect(gen.variants(seed, "vary it", { variantCount: 1, creativeRange: "EXPLORE", aspects: [] })).rejects.toThrow(/quota/i);
+    expect(variants).not.toHaveBeenCalled();
+  });
+
+  it("reserves only what was actually returned when Stitch answers with fewer variants than asked", async () => {
+    const variants = vi.fn(async () => [sdkScreen({ id: "v1" })]);
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()), variants });
+    const seed = await gen.generate("go");
+    const out = await gen.variants(seed, "vary it", { variantCount: 3, creativeRange: "EXPLORE", aspects: [] });
+    expect(out.map((s) => s.id)).toEqual(["v1"]);
+    expect((await readQuota(dir)).used).toBe(2); // 1 seed + 1 variant actually made, not 3
+  });
+
+  it("does not retry a variants projection failure, and reserves only the one unit spent up front", async () => {
+    const variants = vi.fn(async () => { throw new StitchProjectionError("generate_variants", "0 screens across them"); });
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()), variants });
+    const seed = await gen.generate("go");
+    await expect(gen.variants(seed, "vary it", { variantCount: 2, creativeRange: "EXPLORE", aspects: [] })).rejects.toThrow(
+      StitchProjectionError,
+    );
+    expect(variants).toHaveBeenCalledTimes(1);
+    expect((await readQuota(dir)).used).toBe(2); // 1 seed + 1 unit reserved before the failed call
+  });
+
   it("reserves one generation before calling the SDK", async () => {
     const { gen } = make({ generate: vi.fn(async () => sdkScreen()) });
     await gen.generate("go");

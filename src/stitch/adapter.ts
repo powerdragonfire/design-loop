@@ -123,14 +123,17 @@ export class StitchGenerator implements Generator {
   }
 
   /**
-   * Quota is reserved per screen actually returned, after the call: Stitch may return fewer variants
-   * than asked for, and reserving the requested count up front would spend generations that were
-   * never made. The prompt is announced first, as `generate` and `edit` do.
+   * Quota is reserved in two parts, to keep both of `spend`'s invariants at once. One unit goes down
+   * BEFORE the call, exactly like `spend`, so an exhausted quota still never reaches the SDK. The rest
+   * goes down AFTER, once the actual count is known: Stitch may return fewer variants than asked for,
+   * and reserving the requested count up front would spend generations that were never made. The
+   * prompt is announced first, as `generate` and `edit` do.
    */
   async variants(seed: Screen, prompt: string, opts: VariantOptions): Promise<Screen[]> {
     this.onPrompt?.({ what: "variants", prompt });
+    await reserve(this.quotaDir, 1);
     const made = await this.retry("variants", () => this.project.variants(seed.id, prompt, opts, this.deviceType, this.modelId), retryableCall);
-    await reserve(this.quotaDir, made.length);
+    if (made.length > 1) await reserve(this.quotaDir, made.length - 1);
     return made.map((s) => this.wrap(s));
   }
 

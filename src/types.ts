@@ -1,7 +1,3 @@
-// Re-exported from the Stitch SDK layer (not restated here) so the variant vocabulary
-// stays single-sourced; stitch/ has no dependency back on this file, so this is not a cycle.
-import type { CreativeRange, VariantAspect } from "./stitch/sdk.js";
-
 export type Severity = "blocker" | "major" | "minor";
 export type Effort = "low" | "medium" | "high";
 export type CriticName =
@@ -39,6 +35,12 @@ export interface MeasuredDoc {
   viewport: { w: number; h: number };
   nodes: MeasuredNode[];
 }
+
+// Owned here, not in stitch/sdk.ts: types.ts is the domain-types foundation most of the
+// codebase imports, while stitch/ is a vendor-adapter leaf — a foundation must not depend
+// on a leaf. sdk.ts imports these back and re-exports them for its existing consumers.
+export type CreativeRange = "REFINE" | "EXPLORE" | "REIMAGINE";
+export type VariantAspect = "LAYOUT" | "COLOR_SCHEME" | "IMAGES" | "TEXT_FONT" | "TEXT_CONTENT";
 
 export interface Config {
   sigma: number | null;

@@ -1,10 +1,12 @@
 import { stitch } from "@google/stitch-sdk";
+// CreativeRange/VariantAspect live in types.js, the domain-types foundation; this adapter
+// leaf imports and re-exports them so existing consumers of stitch/sdk.js are unaffected.
+import type { CreativeRange, VariantAspect } from "../types.js";
 
+export type { CreativeRange, VariantAspect };
 export type DeviceType = "DEVICE_TYPE_UNSPECIFIED" | "MOBILE" | "DESKTOP" | "TABLET" | "AGNOSTIC";
 export type ModelId = "MODEL_ID_UNSPECIFIED" | "GEMINI_3_PRO" | "GEMINI_3_FLASH" | "GEMINI_3_1_PRO";
 
-export type CreativeRange = "REFINE" | "EXPLORE" | "REIMAGINE";
-export type VariantAspect = "LAYOUT" | "COLOR_SCHEME" | "IMAGES" | "TEXT_FONT" | "TEXT_CONTENT";
 export interface VariantOptions {
   variantCount: number;
   creativeRange: CreativeRange;

@@ -60,6 +60,31 @@ describe("loadContract", () => {
       .rejects.toThrow(/candidates.creativeRange/);
   });
 
+  it("accepts variantsPerFamily: 0, the compatibility default", async () => {
+    const { config } = await loadContract(FIX, { candidates: { variantsPerFamily: 0 } } as never);
+    expect(config.candidates.variantsPerFamily).toBe(0);
+  });
+
+  it("accepts variantsPerFamily: 5, Stitch's own cap", async () => {
+    const { config } = await loadContract(FIX, { candidates: { variantsPerFamily: 5 } } as never);
+    expect(config.candidates.variantsPerFamily).toBe(5);
+  });
+
+  it("refuses a negative variantsPerFamily", async () => {
+    await expect(loadContract(FIX, { candidates: { variantsPerFamily: -1 } } as never))
+      .rejects.toThrow(/candidates.variantsPerFamily/);
+  });
+
+  it("refuses families: 0", async () => {
+    await expect(loadContract(FIX, { candidates: { families: 0 } } as never))
+      .rejects.toThrow(/candidates.families/);
+  });
+
+  it("accepts families: 1", async () => {
+    const { config } = await loadContract(FIX, { candidates: { families: 1 } } as never);
+    expect(config.candidates.families).toBe(1);
+  });
+
   describe("malformed tokens.json", () => {
     const tmpDirs: string[] = [];
 

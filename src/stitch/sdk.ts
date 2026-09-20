@@ -93,43 +93,66 @@ const downloadUrl = (value: unknown, field: "htmlCode" | "screenshot"): string =
 };
 
 /**
+ * Builds a screen handle around a projected `ScreenData`. Module-level (not a closure inside
+ * `createSdkProject`) so `screenFromId` can reach it too, without a project instance or a cast.
+ */
+function makeScreen(projectId: string, callTool: CallTool, data: ScreenData): SdkScreen {
+  const id = idOf(data);
+  /** Only called when the generate/edit response carried no URL of its own. */
+  const refetch = (): Promise<unknown> =>
+    callTool("get_screen", { projectId, screenId: id, name: `projects/${projectId}/screens/${id}` });
+  const link = async (field: "htmlCode" | "screenshot"): Promise<string> =>
+    downloadUrl(data, field) || downloadUrl(await refetch(), field);
+
+  return {
+    id,
+    edit: async (prompt, deviceType, modelId) =>
+      makeScreen(
+        projectId,
+        callTool,
+        projectScreen(
+          await callTool("edit_screens", { projectId, selectedScreenIds: [id], prompt, deviceType, modelId }),
+          "edit_screens",
+        ),
+      ),
+    getHtml: () => link("htmlCode"),
+    getImage: () => link("screenshot"),
+  };
+}
+
+/**
  * Speaks to the Stitch MCP tools directly instead of going through the SDK's Project/Screen classes, which
  * are only a thin wrapper over the same `callTool` plus the broken projection above. Behaviour otherwise
  * matches SDK 0.3.5: bare ids in the arguments, cached download URLs preferred over a second `get_screen`,
  * and "" rather than a throw when no URL is to be had — the adapter turns that into a named error.
  */
 export function createSdkProject(projectId: string, callTool: CallTool = defaultCallTool): SdkProject {
-  const screenOf = (data: ScreenData): SdkScreen => {
-    const id = idOf(data);
-    /** Only called when the generate/edit response carried no URL of its own. */
-    const refetch = (): Promise<unknown> =>
-      callTool("get_screen", { projectId, screenId: id, name: `projects/${projectId}/screens/${id}` });
-    const link = async (field: "htmlCode" | "screenshot"): Promise<string> =>
-      downloadUrl(data, field) || downloadUrl(await refetch(), field);
-
-    return {
-      id,
-      edit: async (prompt, deviceType, modelId) =>
-        screenOf(
-          projectScreen(
-            await callTool("edit_screens", { projectId, selectedScreenIds: [id], prompt, deviceType, modelId }),
-            "edit_screens",
-          ),
-        ),
-      getHtml: () => link("htmlCode"),
-      getImage: () => link("screenshot"),
-    };
-  };
-
   return {
     generate: async (prompt, deviceType, modelId) =>
-      screenOf(
+      makeScreen(
+        projectId,
+        callTool,
         projectScreen(
           await callTool("generate_screen_from_text", { projectId, prompt, deviceType, modelId }),
           "generate_screen_from_text",
         ),
       ),
   };
+}
+
+/**
+ * A handle for a screen that was generated in an earlier process, rebuilt from its id alone so a resumed
+ * run can edit it without spending quota to make it again.
+ *
+ * `getHtml` and `getImage` throw. They would resolve through `get_screen`, which the live API rejects with
+ * `Invalid Argument` for its own documented arguments; the caller has the HTML and PNG on disk instead.
+ */
+export function screenFromId(projectId: string, id: string, callTool: CallTool = defaultCallTool): SdkScreen {
+  if (!id) throw new Error("screenFromId needs a screen id");
+  const refuse = async (): Promise<never> => {
+    throw new Error(`screen ${id} was rebuilt from an id: read its HTML and image from the run directory instead`);
+  };
+  return { ...makeScreen(projectId, callTool, { id }), getHtml: refuse, getImage: refuse };
 }
 
 /** The shared singleton, not a hand-built client: only its factory honours STITCH_HOST. */

@@ -38,6 +38,18 @@ export interface StitchGeneratorOptions {
   onPrompt?: (info: { what: string; prompt: string }) => void;
 }
 
+/**
+ * Stitch answers an edit in one of two shapes. A small, surgical change comes back as a
+ * `sessionEvent` carrying `dom_operations` and no screen at all: the edit IS applied server-side,
+ * but nothing in the response points at HTML or a PNG, and `get_screen` cannot recover it (the live
+ * API rejects its own documented arguments, and a freshly generated screen is absent from
+ * `list_screens`). A larger change comes back as a full `design.screens[]` with both download URLs.
+ * The chair's prompts are deliberately small — "Make exactly these 3 changes and nothing else" — so
+ * without this suffix most rounds take the first path and a run dies at v01 with
+ * `StitchProjectionError`. Asking for the whole screen forces the second path.
+ */
+const WHOLE_SCREEN = "\n\nReturn the complete updated screen, not a partial edit.";
+
 /** Waits before the 2nd and 3rd attempt. */
 const BACKOFF_MS = [1000, 4000];
 /** A download that has not finished in a minute is hung; without this the whole run waits on it forever. */
@@ -129,7 +141,8 @@ export class StitchGenerator implements Generator {
   private wrap(inner: SdkScreen): Screen {
     return {
       id: inner.id,
-      edit: (prompt) => this.spend("edit", prompt, () => inner.edit(prompt, this.deviceType, this.modelId)),
+      // The suffix is machinery, not intent, so `spend` still reports the chair's own prompt.
+      edit: (prompt) => this.spend("edit", prompt, () => inner.edit(prompt + WHOLE_SCREEN, this.deviceType, this.modelId)),
       getHtml: () => this.download(inner, "HTML", () => inner.getHtml(), (res) => res.text()),
       getImage: async () => {
         const png = await this.download(inner, "image", () => inner.getImage(), async (res) =>

@@ -56,7 +56,8 @@ describe("the prompt the CLI sends to Stitch", () => {
     expect(callTool).toHaveBeenLastCalledWith("edit_screens", expect.objectContaining({
       projectId: "p1",
       selectedScreenIds: ["s1"],
-      prompt: "make the button larger",
+      // The chair's prompt, plus the suffix that stops Stitch answering with a dom_operations patch.
+      prompt: "make the button larger\n\nReturn the complete updated screen, not a partial edit.",
     }));
   });
 

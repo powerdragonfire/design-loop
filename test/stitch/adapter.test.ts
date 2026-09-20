@@ -82,9 +82,20 @@ describe("StitchGenerator", () => {
     const { gen } = make({ generate: vi.fn(async () => inner) });
     const s = await gen.generate("go");
     const edited = await s.edit("fix");
-    expect(inner.edit).toHaveBeenCalledWith("fix", "MOBILE", undefined);
+    expect(inner.edit).toHaveBeenCalledWith(expect.stringContaining("fix"), "MOBILE", undefined);
     expect(await edited.getHtml()).toBe("<p>hi</p>");
     expect((await readQuota(dir)).used).toBe(2);
+  });
+
+  // A small edit otherwise comes back as a dom_operations patch with no screen to download, and
+  // `get_screen` cannot recover it; asking for the whole screen is what keeps a round fetchable.
+  it("asks Stitch for the whole screen, so a small edit is not answered with a DOM patch", async () => {
+    const inner = sdkScreen();
+    const { gen } = make({ generate: vi.fn(async () => inner) });
+    await (await gen.generate("go")).edit("Make exactly these 1 changes and nothing else: raise the caption to 14px.");
+    const sent = inner.edit.mock.calls[0]![0] as string;
+    expect(sent).toContain("Make exactly these 1 changes and nothing else: raise the caption to 14px.");
+    expect(sent).toMatch(/complete updated screen, not a partial edit/);
   });
 
   it("reserves one generation before calling the SDK", async () => {

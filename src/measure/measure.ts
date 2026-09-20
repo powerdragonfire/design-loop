@@ -25,6 +25,12 @@ export async function measure(html: string): Promise<MeasuredDoc> {
       if (!(err instanceof playwrightErrors.TimeoutError)) throw err;
     }
     const nodes = await page.evaluate((props) => {
+      // KEEP FIRST. Playwright serialises this body and the browser re-parses it, so it may not
+      // reference anything left behind in the Node module scope — and tsx, which is how the CLI
+      // runs, compiles with esbuild's keepNames: every named function below is rewritten to
+      // `__name(fn, "fn")`, whose helper never crosses over. An identity shim satisfies those calls.
+      // vitest does not keep names, so only test/measure/runtime.test.ts can catch a regression here.
+      (globalThis as { __name?: <T>(fn: T, name: string) => T }).__name ??= (fn) => fn;
       // Build a stable unique selector: prefer #id ONLY when that id is unique in
       // the document (generated HTML often repeats ids), else an nth-of-type path.
       // Task 4 resolves critic-cited selectors against these strings, so

@@ -10,7 +10,7 @@ import { runCommittee, type LlmClient } from "../critics/llm.js";
 import { chair, type ChairClient } from "../chair/chair.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
 import { MONTHLY_LIMIT, readQuota } from "../stitch/quota.js";
-import { openRun, type Degradation } from "../store/store.js";
+import { openRun, versionName, type Degradation } from "../store/store.js";
 import { readCalibration, type Calibration } from "./calibration.js";
 import { costUsd } from "./pricing.js";
 import { groupTokenIssues } from "./group.js";
@@ -125,7 +125,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     // regression can be read back against what the round was trying to fix. Round 0 has none.
     let changes: { requested: number; applied: Issue[] } | undefined;
     for (let n = 0; ; n++) {
-      const version = `v${String(n).padStart(2, "0")}`;
+      const version = versionName(n);
       progress.banner(n === 0 ? `${version} · first generation` : `${version} · edit ${n} of at most ${cfg.maxRounds}`, {
         fraction: n / cfg.maxRounds,
         status: `$${spentSoFar().toFixed(2)} so far · ${stitchGenerations} Stitch generation${stitchGenerations === 1 ? "" : "s"}`,

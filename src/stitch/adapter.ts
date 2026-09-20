@@ -1,6 +1,7 @@
 import { reserve } from "./quota.js";
 import {
   createSdkProject,
+  screenFromId,
   StitchProjectionError,
   type CreativeRange,
   type DeviceType,
@@ -23,6 +24,8 @@ export interface Screen {
 export interface Generator {
   generate(prompt: string): Promise<Screen>;
   variants(seed: Screen, prompt: string, opts: VariantOptions): Promise<Screen[]>;
+  /** Rebuilds a handle for a screen this generator already produced. No network, no quota. */
+  fromId?(id: string): Screen;
 }
 
 export interface FetchResponse {
@@ -36,6 +39,8 @@ export interface FetchResponse {
 
 export interface StitchGeneratorOptions {
   project: SdkProject;
+  /** The project screens are generated in. Needed only to rebuild a handle by id, not to generate or edit. */
+  projectId?: string;
   /** Directory whose `.design-loop/quota.json` counts this month's generations. */
   quotaDir: string;
   fetch?: (url: string, init?: { signal?: AbortSignal }) => Promise<FetchResponse>;
@@ -99,6 +104,7 @@ async function drain(res: FetchResponse): Promise<void> {
 
 export class StitchGenerator implements Generator {
   private readonly project: SdkProject;
+  private readonly projectId: string | undefined;
   private readonly quotaDir: string;
   private readonly fetchUrl: (url: string, init?: { signal?: AbortSignal }) => Promise<FetchResponse>;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -109,6 +115,7 @@ export class StitchGenerator implements Generator {
 
   constructor(opts: StitchGeneratorOptions) {
     this.project = opts.project;
+    this.projectId = opts.projectId;
     this.quotaDir = opts.quotaDir;
     this.fetchUrl = opts.fetch ?? ((url, init) => fetch(url, init));
     this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -120,6 +127,12 @@ export class StitchGenerator implements Generator {
 
   async generate(prompt: string): Promise<Screen> {
     return this.spend("generate", prompt, () => this.project.generate(prompt, this.deviceType, this.modelId));
+  }
+
+  /** Rebuilds a handle for a screen an earlier process generated, so a resumed run can edit it without regenerating it. */
+  fromId(id: string): Screen {
+    if (!this.projectId) throw new Error("StitchGenerator has no projectId; it cannot rebuild a screen by id");
+    return this.wrap(screenFromId(this.projectId, id));
   }
 
   /**
@@ -228,7 +241,7 @@ export function createStitchGenerator(opts: Omit<StitchGeneratorOptions, "projec
     const missing = env.STITCH_ACCESS_TOKEN ? "GOOGLE_CLOUD_PROJECT" : "STITCH_ACCESS_TOKEN";
     throw new Error(`${missing} is not set; the OAuth route needs both STITCH_ACCESS_TOKEN and GOOGLE_CLOUD_PROJECT (or set STITCH_API_KEY)`);
   }
-  return new StitchGenerator({ ...opts, project: createSdkProject(projectId) });
+  return new StitchGenerator({ ...opts, project: createSdkProject(projectId), projectId });
 }
 
 export interface FakeScreenSpec {
@@ -260,5 +273,17 @@ export class FakeGenerator implements Generator {
     const out: Screen[] = [];
     for (let i = 0; i < opts.variantCount; i++) out.push(await this.generate(prompt));
     return out;
+  }
+
+  fromId(id: string): Screen {
+    const index = Number(id.replace("fake-", ""));
+    const spec = this.script[index];
+    if (!spec) throw new Error(`no fake screen ${id}`);
+    return {
+      id,
+      edit: (prompt) => this.generate(prompt),
+      getHtml: async () => spec.html,
+      getImage: async () => spec.png,
+    };
   }
 }

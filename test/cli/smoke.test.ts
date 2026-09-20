@@ -39,7 +39,10 @@ const chairOf = (err?: Error): ChairClient => ({
 });
 
 const generatorOf = () => new FakeGenerator([{ html: HTML, png: PNG }, { html: HTML, png: PNG }]);
-const brokenGenerator = (): Generator => ({ generate: async () => { throw new Error("Stitch is unreachable"); } });
+const brokenGenerator = (): Generator => ({
+  generate: async () => { throw new Error("Stitch is unreachable"); },
+  variants: async () => { throw new Error("Stitch is unreachable"); },
+});
 
 const run = (over: Partial<Parameters<typeof smoke>[0]> = {}): Promise<SmokeReport> =>
   smoke({

@@ -55,7 +55,8 @@ describe("StitchGenerator", () => {
   const make = (project: any, extra: Record<string, any> = {}) => {
     const sleeps: number[] = [];
     const fetch = extra.fetch ?? okFetch();
-    const gen = new StitchGenerator({ project, quotaDir: dir, fetch, sleep: async (ms: number) => { sleeps.push(ms); }, ...extra });
+    const projectStub = { variants: async () => [], ...project };
+    const gen = new StitchGenerator({ project: projectStub, quotaDir: dir, fetch, sleep: async (ms: number) => { sleeps.push(ms); }, ...extra });
     return { gen, sleeps, fetch };
   };
 
@@ -96,6 +97,17 @@ describe("StitchGenerator", () => {
     const sent = inner.edit.mock.calls[0]![0] as string;
     expect(sent).toContain("Make exactly these 1 changes and nothing else: raise the caption to 14px.");
     expect(sent).toMatch(/complete updated screen, not a partial edit/);
+  });
+
+  it("reserves one generation per variant returned, and wraps each", async () => {
+    const inner = sdkScreen();
+    const variants = vi.fn(async () => [sdkScreen({ id: "v1" }), sdkScreen({ id: "v2" })]);
+    const { gen } = make({ generate: vi.fn(async () => inner), variants });
+    const seed = await gen.generate("go");
+    const out = await gen.variants(seed, "vary it", { variantCount: 2, creativeRange: "EXPLORE", aspects: ["LAYOUT"] });
+    expect(variants).toHaveBeenCalledWith("s1", "vary it", { variantCount: 2, creativeRange: "EXPLORE", aspects: ["LAYOUT"] }, "MOBILE", undefined);
+    expect(out.map((s) => s.id)).toEqual(["v1", "v2"]);
+    expect((await readQuota(dir)).used).toBe(3); // 1 seed + 2 variants
   });
 
   it("reserves one generation before calling the SDK", async () => {
@@ -272,6 +284,17 @@ describe("StitchGenerator", () => {
       const { gen } = make({ generate: vi.fn() }, { onPrompt: (p: unknown) => seen.push(p) });
       await expect(gen.generate("go")).rejects.toThrow(/quota/i);
       expect(seen).toEqual([{ what: "generate", prompt: "go" }]);
+    });
+
+    it("announces the variant prompt before it is sent", async () => {
+      const seen: unknown[] = [];
+      const { gen } = make(
+        { generate: vi.fn(async () => sdkScreen()), variants: vi.fn(async () => [sdkScreen({ id: "v1" })]) },
+        { onPrompt: (p: unknown) => seen.push(p) },
+      );
+      const seed = await gen.generate("go");
+      await gen.variants(seed, "vary it", { variantCount: 1, creativeRange: "REFINE", aspects: [] });
+      expect(seen).toEqual([{ what: "generate", prompt: "go" }, { what: "variants", prompt: "vary it" }]);
     });
   });
 });

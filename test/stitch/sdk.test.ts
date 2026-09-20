@@ -151,3 +151,22 @@ describe("createSdkProject", () => {
     });
   });
 });
+
+describe("createSdkProject.variants", () => {
+  it("sends the variant options verbatim and wraps every screen returned", async () => {
+    const callTool = vi.fn(async () => ({
+      outputComponents: [{ design: { screens: [{ id: "v1" }, { id: "v2" }] } }],
+    }));
+    const project = createSdkProject("p1", callTool);
+    const out = await project.variants("s0", "make it sing", { variantCount: 2, creativeRange: "EXPLORE", aspects: ["LAYOUT"] }, "MOBILE");
+    expect(callTool).toHaveBeenCalledWith("generate_variants", {
+      projectId: "p1",
+      selectedScreenIds: ["s0"],
+      prompt: "make it sing",
+      deviceType: "MOBILE",
+      modelId: undefined,
+      variantOptions: { variantCount: 2, creativeRange: "EXPLORE", aspects: ["LAYOUT"] },
+    });
+    expect(out.map((s) => s.id)).toEqual(["v1", "v2"]);
+  });
+});

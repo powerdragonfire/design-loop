@@ -3,6 +3,14 @@ import { stitch } from "@google/stitch-sdk";
 export type DeviceType = "DEVICE_TYPE_UNSPECIFIED" | "MOBILE" | "DESKTOP" | "TABLET" | "AGNOSTIC";
 export type ModelId = "MODEL_ID_UNSPECIFIED" | "GEMINI_3_PRO" | "GEMINI_3_FLASH" | "GEMINI_3_1_PRO";
 
+export type CreativeRange = "REFINE" | "EXPLORE" | "REIMAGINE";
+export type VariantAspect = "LAYOUT" | "COLOR_SCHEME" | "IMAGES" | "TEXT_FONT" | "TEXT_CONTENT";
+export interface VariantOptions {
+  variantCount: number;
+  creativeRange: CreativeRange;
+  aspects: VariantAspect[];
+}
+
 /**
  * The slice of @google/stitch-sdk's Screen and Project that the adapter uses. In SDK 0.3.5 `getHtml()` and
  * `getImage()` resolve to DOWNLOAD URLs (or "" when the response lacks one), not content.
@@ -16,6 +24,13 @@ export interface SdkScreen {
 
 export interface SdkProject {
   generate(prompt: string, deviceType?: DeviceType, modelId?: ModelId): Promise<SdkScreen>;
+  variants(
+    seedId: string,
+    prompt: string,
+    opts: VariantOptions,
+    deviceType?: DeviceType,
+    modelId?: ModelId,
+  ): Promise<SdkScreen[]>;
 }
 
 /** The one call the MCP transport exposes. Injected so the projection can be tested without a network. */
@@ -137,6 +152,18 @@ export function createSdkProject(projectId: string, callTool: CallTool = default
           "generate_screen_from_text",
         ),
       ),
+    variants: async (seedId, prompt, opts, deviceType, modelId) =>
+      projectScreens(
+        await callTool("generate_variants", {
+          projectId,
+          selectedScreenIds: [seedId],
+          prompt,
+          deviceType,
+          modelId,
+          variantOptions: opts,
+        }),
+        "generate_variants",
+      ).map(screenOf),
   };
 }
 

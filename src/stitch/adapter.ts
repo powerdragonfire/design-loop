@@ -1,7 +1,17 @@
 import { reserve } from "./quota.js";
-import { createSdkProject, StitchProjectionError, type DeviceType, type ModelId, type SdkProject, type SdkScreen } from "./sdk.js";
+import {
+  createSdkProject,
+  StitchProjectionError,
+  type CreativeRange,
+  type DeviceType,
+  type ModelId,
+  type SdkProject,
+  type SdkScreen,
+  type VariantAspect,
+  type VariantOptions,
+} from "./sdk.js";
 
-export type { DeviceType, ModelId, SdkProject, SdkScreen };
+export type { CreativeRange, DeviceType, ModelId, SdkProject, SdkScreen, VariantAspect, VariantOptions };
 
 export interface Screen {
   id: string;
@@ -12,6 +22,7 @@ export interface Screen {
 
 export interface Generator {
   generate(prompt: string): Promise<Screen>;
+  variants(seed: Screen, prompt: string, opts: VariantOptions): Promise<Screen[]>;
 }
 
 export interface FetchResponse {
@@ -109,6 +120,18 @@ export class StitchGenerator implements Generator {
 
   async generate(prompt: string): Promise<Screen> {
     return this.spend("generate", prompt, () => this.project.generate(prompt, this.deviceType, this.modelId));
+  }
+
+  /**
+   * Quota is reserved per screen actually returned, after the call: Stitch may return fewer variants
+   * than asked for, and reserving the requested count up front would spend generations that were
+   * never made. The prompt is announced first, as `generate` and `edit` do.
+   */
+  async variants(seed: Screen, prompt: string, opts: VariantOptions): Promise<Screen[]> {
+    this.onPrompt?.({ what: "variants", prompt });
+    const made = await this.retry("variants", () => this.project.variants(seed.id, prompt, opts, this.deviceType, this.modelId), retryableCall);
+    await reserve(this.quotaDir, made.length);
+    return made.map((s) => this.wrap(s));
   }
 
   /**
@@ -228,5 +251,11 @@ export class FakeGenerator implements Generator {
       getHtml: async () => spec.html,
       getImage: async () => spec.png,
     };
+  }
+
+  async variants(_seed: Screen, prompt: string, opts: VariantOptions): Promise<Screen[]> {
+    const out: Screen[] = [];
+    for (let i = 0; i < opts.variantCount; i++) out.push(await this.generate(prompt));
+    return out;
   }
 }

@@ -360,6 +360,7 @@ describe("runScreen", () => {
     const text = await logged(dir, {});
     expect(manifest(dir).calibration).toEqual({
       sigma: 3, criticModel: "claude-sonnet-5", weights: CALIBRATION.weights, measuredAt: CALIBRATION.measuredAt,
+      criticMode: "api",
     });
     expect(text).not.toMatch(/WARNING/);
     expect(text).not.toMatch(/by hand/);
@@ -393,7 +394,7 @@ describe("runScreen", () => {
       const dir = setup(); const { progress, events } = recordProgress();
       await run(dir, new FakeGenerator([shot(48)]), llmOf([90]).llm, chairOf().client, { progress });
       expect(events[0]).toMatch(/^header run home · design /);
-      expect(events[1]).toMatch(/^header critic claude-sonnet-5 · chair claude-opus-5 · sigma 3 · up to \d+ edits$/);
+      expect(events[1]).toMatch(/^header critic claude-sonnet-5 \(api\) · chair claude-opus-5 · sigma 3 · up to \d+ edits$/);
       expect(events[2]).toMatch(new RegExp(`^header Stitch \\d+/${MONTHLY_LIMIT} used this month · results in ${runDir(dir)}$`));
       expect(events[3]).toBe(`log ${join(runDir(dir), "events.jsonl")}`);
     });

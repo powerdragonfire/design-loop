@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it, expect } from "vitest";
@@ -71,6 +71,42 @@ describe("loadContract", () => {
     it("rejects an empty object", async () => {
       await expect(loadContract(withTokens("{}")))
         .rejects.toThrow(/tokens\.json defines no tokens/);
+    });
+  });
+
+  describe("criticMode", () => {
+    const tmpDirs: string[] = [];
+
+    afterEach(() => {
+      for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+    });
+
+    function setup(): string {
+      const dir = mkdtempSync(join(tmpdir(), "design-loop-contract-"));
+      tmpDirs.push(dir);
+      cpSync(FIX, dir, { recursive: true, filter: (src) => !src.includes(".design-loop") });
+      return dir;
+    }
+
+    it("defaults criticMode to api when config.json omits it", async () => {
+      const dir = setup();
+      expect((await loadContract(dir)).config.criticMode).toBe("api");
+    });
+
+    it("accepts criticMode agent", async () => {
+      const dir = setup();
+      const file = join(dir, "config.json");
+      const cfg = JSON.parse(readFileSync(file, "utf8"));
+      writeFileSync(file, JSON.stringify({ ...cfg, criticMode: "agent" }));
+      expect((await loadContract(dir)).config.criticMode).toBe("agent");
+    });
+
+    it("rejects an unknown criticMode", async () => {
+      const dir = setup();
+      const file = join(dir, "config.json");
+      const cfg = JSON.parse(readFileSync(file, "utf8"));
+      writeFileSync(file, JSON.stringify({ ...cfg, criticMode: "robots" }));
+      await expect(loadContract(dir)).rejects.toThrow(/invalid config\.json.*criticMode/s);
     });
   });
 });

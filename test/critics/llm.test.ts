@@ -7,6 +7,7 @@ const CFG = {
   models: { critic: "claude-sonnet-5", chair: "claude-opus-5" },
   weights: { typography: 0.25, behavioural: 0.2, accessibility: 0.2, tokenConformance: 0.2, feasibility: 0.15 },
   batchMode: false,
+  criticMode: "api" as const,
 };
 const stub = (critic: CriticName): Critique =>
   ({ critic, score: 70, issues: [], resolved: { claimed: [], verified: [] } });

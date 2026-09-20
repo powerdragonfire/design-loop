@@ -44,6 +44,8 @@ export interface Config {
   models: { critic: string; chair: string };
   weights: Record<CriticName, number>;
   batchMode: boolean;
+  /** Where critiques come from: the Anthropic API, or files written by Claude Code subagents. */
+  criticMode: "api" | "agent";
 }
 
 export interface Contract {

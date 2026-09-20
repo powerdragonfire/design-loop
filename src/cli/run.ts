@@ -88,7 +88,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   const run = await openRun(designDir, screen, date);
   progress.header([
     `run ${screen} · design ${designDir}`,
-    `critic ${cfg.models.critic} · chair ${cfg.models.chair} · sigma ${sigma} · up to ${cfg.maxRounds} edits`,
+    `critic ${cfg.models.critic} (${cfg.criticMode}) · chair ${cfg.models.chair} · sigma ${sigma} · up to ${cfg.maxRounds} edits`,
     `Stitch ${quota.used}/${MONTHLY_LIMIT} used this month · results in ${run.dir}`,
   ]);
   progress.attachLog(join(run.dir, "events.jsonl"));

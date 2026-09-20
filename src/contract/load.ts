@@ -21,6 +21,7 @@ const ConfigSchema = z.strictObject({
     feasibility: z.number().nonnegative(),
   }),
   batchMode: z.boolean(),
+  criticMode: z.enum(["api", "agent"]).default("api"),
 });
 
 const WEIGHT_EPSILON = 1e-9;

@@ -55,4 +55,28 @@ describe("writeVersion still works as before", () => {
     expect(existsSync(join(run.dir, "v00", "composite.json"))).toBe(true);
     expect(existsSync(join(run.dir, "v00", "screen.png"))).toBe(true);
   });
+
+  it("passes the committee inputs through to the version directory", async () => {
+    const run = await newRun();
+    await run.writeVersion({
+      index: 0, png: Buffer.from("p"), html: "<html></html>", doc, critiques: [critique()],
+      composite: 70, gatePass: false, prompt: "make it", openIssues: [], parent: null,
+      screenId: "sc-1", digest: "viewport: 390x844",
+      carriedIssues: [issue("typography-001")], measurements: [issue("det-001")],
+    });
+    const base = join(run.dir, "v00");
+    expect(readFileSync(join(base, "screen-id.txt"), "utf8")).toBe("sc-1");
+    expect(readFileSync(join(base, "digest.txt"), "utf8")).toBe("viewport: 390x844");
+    expect(JSON.parse(readFileSync(join(base, "carried-issues.json"), "utf8"))[0].id).toBe("typography-001");
+    expect(JSON.parse(readFileSync(join(base, "measurements.json"), "utf8"))[0].id).toBe("det-001");
+  });
+
+  it("writes no digest.txt when digest is omitted, even with critiques present", async () => {
+    const run = await newRun();
+    await run.writeVersion({
+      index: 0, png: Buffer.from("p"), html: "<html></html>", doc, critiques: [critique()],
+      composite: 70, gatePass: false, prompt: "make it", openIssues: [], parent: null,
+    });
+    expect(existsSync(join(run.dir, "v00", "digest.txt"))).toBe(false);
+  });
 });

@@ -3,9 +3,11 @@ import { mkdtempSync } from "node:fs";
 import { mkdir as mkdirAsync, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readDirections, generateCandidates } from "../../src/cli/candidates.js";
+import { readDirections, generateCandidates, pickWinner, selectCandidate, type SelectOptions } from "../../src/cli/candidates.js";
 import { noProgress } from "../../src/cli/progress.js";
-import type { Config } from "../../src/types.js";
+import type { Config, CriticName } from "../../src/types.js";
+import type { Generator, Screen } from "../../src/stitch/adapter.js";
+import type { LlmClient } from "../../src/critics/llm.js";
 
 describe("readDirections", () => {
   let dir: string;
@@ -134,5 +136,124 @@ describe("generateCandidates", () => {
       cfg: cfg({ families: 1, variantsPerFamily: 2 }), progress: noProgress,
     })).rejects.toThrow("503 from Stitch");
     expect(variants).not.toHaveBeenCalled();
+  });
+});
+
+describe("pickWinner", () => {
+  const row = (id: string, composite: number, blockers: number): any => ({ id, composite, blockers });
+
+  it("takes the highest composite when nothing is close", () => {
+    expect(pickWinner([row("c0", 70, 0), row("c1", 85, 9)], 4).id).toBe("c1");
+  });
+
+  it("prefers fewer blockers among candidates within one sigma of the leader", () => {
+    expect(pickWinner([row("c0", 85, 9), row("c1", 83, 1)], 4).id).toBe("c1");
+  });
+
+  it("ignores a candidate more than one sigma behind, however clean it is", () => {
+    expect(pickWinner([row("c0", 85, 9), row("c1", 78, 0)], 4).id).toBe("c0");
+  });
+
+  it("breaks a blocker tie on composite, then on id, so selection is deterministic", () => {
+    expect(pickWinner([row("c1", 83, 2), row("c0", 84, 2)], 4).id).toBe("c0");
+    expect(pickWinner([row("c1", 84, 2), row("c0", 84, 2)], 4).id).toBe("c0");
+  });
+
+  it("never returns a candidate whose committee failed", () => {
+    const dead = { ...row("c0", 99, 0), failed: "committee unavailable" };
+    expect(pickWinner([dead, row("c1", 60, 3)], 4).id).toBe("c1");
+  });
+
+  it("throws when every candidate failed, because there is nothing to iterate", () => {
+    const dead = { ...row("c0", 0, 0), failed: "committee unavailable" };
+    expect(() => pickWinner([dead], 4)).toThrow(/no candidate could be scored/);
+  });
+});
+
+// Distinct, real HTML per candidate index: measure() drives a real headless Chromium, so this
+// needs small-but-real markup (an element with inline styles), not an empty stub. Embedding the
+// index in the text is what lets the fake LlmClient below tell candidates apart, since candidates
+// in a family share the same prompt and would otherwise produce an identical digest.
+function candidateHtml(i: number): string {
+  return `<div style="width:200px;height:60px;background:#ffffff">` +
+    `<span style="color:#111111;font-size:16px">Cand ${i}</span></div>`;
+}
+
+function screenStub(i: number): Screen {
+  return {
+    id: `seed${i}`,
+    edit: async () => screenStub(i),
+    getHtml: async () => candidateHtml(i),
+    getImage: async () => Buffer.from(""),
+  };
+}
+
+interface MakeOptsExtra {
+  /** Candidate id whose entire committee (all four LLM critics) fails. */
+  failFor?: string;
+  /** A single critic that fails, but only for the named candidate. */
+  failCritic?: { id: string; critic: CriticName };
+  /** Collects every onDegraded call, for assertions. */
+  degraded?: { critic: CriticName; error: string; id: string }[];
+}
+
+function makeOpts(candOver: Partial<Config["candidates"]> = {}, extra: MakeOptsExtra = {}): SelectOptions {
+  const dir = mkdtempSync(join(tmpdir(), "dl-select-"));
+  let n = 0;
+  const generate = vi.fn(async () => screenStub(n++));
+  const generator: Generator = { generate, variants: async () => [] } as any;
+  const llm: LlmClient = {
+    async critique(critic, input) {
+      const m = /Cand (\d+)/.exec(input.digest);
+      const id = `c${m ? m[1] : "?"}`;
+      if (id === extra.failFor) throw new Error(`committee unavailable for ${id}`);
+      if (extra.failCritic && extra.failCritic.id === id && extra.failCritic.critic === critic) {
+        throw new Error(`${critic} unavailable for ${id}`);
+      }
+      return { critic, score: 90, issues: [], resolved: { claimed: [], verified: [] } };
+    },
+  };
+  return {
+    contract: { tokens: {}, brief: "B", config: cfg(candOver), screens: { home: "S" } } as any,
+    screen: "home",
+    designDir: dir,
+    generator,
+    cfg: cfg(candOver),
+    progress: noProgress,
+    llm,
+    sigma: 4,
+    onDegraded: (critic, error, id) => extra.degraded?.push({ critic, error, id }),
+  };
+}
+
+describe("selectCandidate", () => {
+  it("scores every candidate and returns the winner alongside all the rows", async () => {
+    const sel = await selectCandidate(makeOpts({ families: 2, variantsPerFamily: 0 }));
+    expect(sel.rows).toHaveLength(2);
+    // 4 LLM critiques plus the deterministic tokenConformance critique.
+    expect(sel.rows.every((r) => r.critiques.length === 5)).toBe(true);
+    expect(sel.winner).toBe(sel.rows.find((r) => r.id === sel.winner.id));
+  });
+
+  it("marks a candidate whose committee failed and reports it, without failing the stage", async () => {
+    const sel = await selectCandidate(makeOpts({ families: 2, variantsPerFamily: 0 }, { failFor: "c1" }));
+    expect(sel.rows.find((r) => r.id === "c1")!.failed).toMatch(/committee/);
+    expect(sel.winner.id).toBe("c0");
+  });
+
+  it("keeps scoring a candidate when only one of its LLM critics fails, renormalising instead of throwing", async () => {
+    const degraded: { critic: CriticName; error: string; id: string }[] = [];
+    const sel = await selectCandidate(
+      makeOpts({ families: 2, variantsPerFamily: 0 }, { failCritic: { id: "c1", critic: "feasibility" }, degraded }),
+    );
+    expect(sel.rows).toHaveLength(2);
+    const c1 = sel.rows.find((r) => r.id === "c1")!;
+    expect(c1.failed).toBeUndefined();
+    // The failed critic plus the deterministic one are absent/short one: 3 survivors + tokenConformance.
+    expect(c1.critiques.length).toBe(4);
+    expect(Number.isFinite(c1.composite)).toBe(true);
+    expect(degraded).toEqual([{ critic: "feasibility", error: expect.any(String), id: "c1" }]);
+    // The unaffected candidate still gets its full committee.
+    expect(sel.rows.find((r) => r.id === "c0")!.critiques.length).toBe(5);
   });
 });

@@ -46,4 +46,13 @@ describe("production defaults", () => {
     await writeFile(join(dir, "manifest.json"), JSON.stringify({ committeeRank: ["v02", "v00"] }));
     expect(await d.committeePick(dir)).toBe("v02");
   });
+
+  it("makeGenerator turns a Stitch retry into a warning that names what is retried and when", () => {
+    const warnings: string[] = [];
+    const progress = { warn: (l: string) => warnings.push(l) } as any;
+    defaultDeps("design", io, progress).makeGenerator();
+    const { onRetry } = vi.mocked(createStitchGenerator).mock.calls.at(-1)![0];
+    onRetry!({ what: "generate", attempt: 2, of: 3, waitMs: 1000, error: "503 unavailable\nrequest_id: abc" });
+    expect(warnings).toEqual(["stitch generate failed, attempt 2 of 3 in 1s: 503 unavailable"]);
+  });
 });

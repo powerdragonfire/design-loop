@@ -110,6 +110,18 @@ describe("StitchGenerator", () => {
     expect((await readQuota(dir)).used).toBe(1);
   });
 
+  it("tells onRetry what is being retried, which attempt is next, and how long it waits", async () => {
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new Error("e1")).mockRejectedValueOnce(new Error("e2")).mockRejectedValueOnce(new Error("e3"));
+    const seen: unknown[] = [];
+    const { gen } = make({ generate }, { onRetry: (r: unknown) => seen.push(r) });
+    await expect(gen.generate("go")).rejects.toThrow("e3");
+    expect(seen).toEqual([
+      { what: "generate", attempt: 2, of: 3, waitMs: 1000, error: "e1" },
+      { what: "generate", attempt: 3, of: 3, waitMs: 4000, error: "e2" },
+    ]);
+  });
+
   it("succeeds after one transient failure", async () => {
     const generate = vi.fn().mockRejectedValueOnce(new Error("blip")).mockResolvedValueOnce(sdkScreen());
     const { gen, sleeps } = make({ generate });
@@ -129,6 +141,16 @@ describe("StitchGenerator", () => {
     const { gen } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch });
     const s = await gen.generate("go");
     await expect(s.getImage()).rejects.toThrow(/PNG/);
+  });
+
+  it("labels a download retry with what is being downloaded", async () => {
+    let n = 0;
+    const flaky = vi.fn(async (_url: string) => (++n === 1 ? res("slow down", 429) : res("<p>ok</p>")));
+    const seen: string[] = [];
+    const { gen } = make({ generate: vi.fn(async () => sdkScreen()) }, { fetch: flaky, onRetry: (r: { what: string }) => seen.push(r.what) });
+    const s = await gen.generate("go");
+    await s.getHtml();
+    expect(seen).toEqual(["HTML download"]);
   });
 
   it("does not retry a 4xx download", async () => {

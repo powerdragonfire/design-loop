@@ -6,6 +6,7 @@ import type { CriticInput, LlmClient } from "../critics/llm.js";
 import type { ChairClient } from "../chair/chair.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
 import { costUsd } from "./pricing.js";
+import { noProgress, type Progress, type Step } from "./progress.js";
 import type { Issue, Usage } from "../types.js";
 
 export interface SmokeStep {
@@ -25,7 +26,11 @@ export interface SmokeOptions {
   generator: Generator;
   llm: LlmClient;
   chairClient: ChairClient;
+  /** Each of the seven steps is shown as it starts and ends, instead of all at once when the last one is done. */
+  progress?: Progress;
 }
+
+const STEPS = 7;
 
 /** A step that never ran because the step it needed did not succeed; it is not a failure of its own. */
 const SKIPPED = "skipped: ";
@@ -80,14 +85,27 @@ export async function smoke(opts: SmokeOptions): Promise<SmokeReport> {
   const contract = await loadContract(designDir, {}, undefined, { allowNullSigma: true });
   const cfg = contract.config;
 
+  const progress = opts.progress ?? noProgress;
   const steps: SmokeStep[] = [];
-  const add = (name: string, ok: boolean, detail: string): void => { steps.push({ name, ok, detail }); };
-  const skip = (name: string, why: string): void => { steps.push({ name, ok: false, detail: `${SKIPPED}${why}` }); };
+  // The step in flight, closed by whichever of add/skip records its result.
+  let current: Step | null = null;
+  const begin = (name: string): void => { current = progress.begin(`${steps.length + 1}/${STEPS} ${name}`); };
+  const add = (name: string, ok: boolean, detail: string): void => {
+    steps.push({ name, ok, detail });
+    const open: Step | null = current;
+    current = null;
+    if (open) (ok ? open.done(detail) : open.fail(detail));
+  };
+  const skip = (name: string, why: string): void => {
+    steps.push({ name, ok: false, detail: `${SKIPPED}${why}` });
+    progress.skipped(`${steps.length}/${STEPS} ${name}`, why);
+  };
   const criticUsage = noUsage();
   const chairUsage = noUsage();
 
   // 1. One real critic call: the schema, adaptive thinking and an image in one non-streaming request.
   let criticInput: CriticInput | null = null;
+  begin("critic call");
   try {
     const doc = await measure(SMOKE_HTML);
     const det = deterministicCritique(doc, contract.tokens);
@@ -112,6 +130,7 @@ export async function smoke(opts: SmokeOptions): Promise<SmokeReport> {
   if (!criticInput) {
     skip("prompt cache", "the critic call did not succeed, so there is nothing cached to hit");
   } else {
+    begin("prompt cache");
     try {
       await llm.critique("typography", criticInput, cfg.models.critic);
       const u = llm.takeUsage?.();
@@ -139,6 +158,7 @@ export async function smoke(opts: SmokeOptions): Promise<SmokeReport> {
     fix: "Enlarge the primary button to at least 44x44px",
     effort: "low",
   };
+  begin("chair call");
   try {
     const out = await chairClient.synthesise(
       { critiques: [], openIssues: [fake], imagePng: PIXEL, tokens: contract.tokens, regression: null },
@@ -161,6 +181,7 @@ export async function smoke(opts: SmokeOptions): Promise<SmokeReport> {
   // 4. A real generation, and the two downloads that follow it.
   let screen: Screen | null = null;
   let html: string | null = null;
+  begin("stitch generate");
   try {
     const generated = await generator.generate("a simple mobile login screen");
     const got = await generated.getHtml();
@@ -179,6 +200,7 @@ export async function smoke(opts: SmokeOptions): Promise<SmokeReport> {
   if (!screen) {
     skip("stitch edit", "the generate step did not succeed, so there is no screen to edit");
   } else {
+    begin("stitch edit");
     try {
       const edited = await screen.edit("make the button larger");
       const editedHtml = await edited.getHtml();
@@ -196,6 +218,7 @@ export async function smoke(opts: SmokeOptions): Promise<SmokeReport> {
   if (html === null) {
     skip("measure real page", "the generate step produced no HTML to measure");
   } else {
+    begin("measure real page");
     try {
       const doc = await measure(html);
       const det = deterministicCritique(doc, contract.tokens);
@@ -217,6 +240,7 @@ export async function smoke(opts: SmokeOptions): Promise<SmokeReport> {
 
   // 7. What this diagnostic cost, and what a whole screen would cost at the digest size just measured.
   let usd: number | null = null;
+  begin("cost");
   try {
     usd = costUsd(cfg.models.critic, criticUsage) + costUsd(cfg.models.chair, chairUsage);
     let detail = `$${usd.toFixed(4)} spent on this check`;

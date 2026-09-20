@@ -2,3 +2,5 @@ node_modules/
 dist/
 .superpowers/
 coverage/
+# design-loop output: the Stitch quota counter and calibration evidence a run writes into its design folder
+.design-loop/

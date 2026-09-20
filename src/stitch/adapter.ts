@@ -48,6 +48,8 @@ export interface StitchGeneratorOptions {
   modelId?: ModelId;
   /** Conker is a phone app, and the SDK's own default leaves the device unspecified. */
   deviceType?: DeviceType;
+  /** Told before each wait between attempts, so a person watching sees a retry instead of a silent stall. */
+  onRetry?: (info: { what: string; attempt: number; of: number; waitMs: number; error: string }) => void;
 }
 
 /** Waits before the 2nd and 3rd attempt. */
@@ -86,6 +88,7 @@ export class StitchGenerator implements Generator {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly modelId: ModelId | undefined;
   private readonly deviceType: DeviceType;
+  private readonly onRetry: StitchGeneratorOptions["onRetry"];
 
   constructor(opts: StitchGeneratorOptions) {
     this.project = opts.project;
@@ -94,27 +97,32 @@ export class StitchGenerator implements Generator {
     this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.modelId = opts.modelId;
     this.deviceType = opts.deviceType ?? "MOBILE";
+    this.onRetry = opts.onRetry;
   }
 
   async generate(prompt: string): Promise<Screen> {
-    return this.spend(() => this.project.generate(prompt, this.deviceType, this.modelId));
+    return this.spend("generate", () => this.project.generate(prompt, this.deviceType, this.modelId));
   }
 
   /**
    * Reserves quota ONCE, before the first attempt: a retry then never double-counts, and an exhausted quota never
    * reaches the SDK. The last error is rethrown once the attempts run out; the reservation stays spent.
    */
-  private async spend(call: () => Promise<SdkScreen>): Promise<Screen> {
+  private async spend(what: string, call: () => Promise<SdkScreen>): Promise<Screen> {
     await reserve(this.quotaDir, 1);
-    return this.wrap(await this.retry(call));
+    return this.wrap(await this.retry(what, call));
   }
 
-  private async retry<T>(fn: () => Promise<T>, shouldRetry: (err: unknown) => boolean = () => true): Promise<T> {
+  private async retry<T>(what: string, fn: () => Promise<T>, shouldRetry: (err: unknown) => boolean = () => true): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       try {
         return await fn();
       } catch (err) {
         if (attempt >= BACKOFF_MS.length || !shouldRetry(err)) throw err;
+        this.onRetry?.({
+          what, attempt: attempt + 2, of: BACKOFF_MS.length + 1, waitMs: BACKOFF_MS[attempt]!,
+          error: err instanceof Error ? err.message : String(err),
+        });
         await this.sleep(BACKOFF_MS[attempt]!);
       }
     }
@@ -123,7 +131,7 @@ export class StitchGenerator implements Generator {
   private wrap(inner: SdkScreen): Screen {
     return {
       id: inner.id,
-      edit: (prompt) => this.spend(() => inner.edit(prompt, this.deviceType, this.modelId)),
+      edit: (prompt) => this.spend("edit", () => inner.edit(prompt, this.deviceType, this.modelId)),
       getHtml: () => this.download(inner, "HTML", () => inner.getHtml(), (res) => res.text()),
       getImage: async () => {
         const png = await this.download(inner, "image", () => inner.getImage(), async (res) =>
@@ -149,9 +157,9 @@ export class StitchGenerator implements Generator {
     getUrl: () => Promise<string>,
     read: (res: FetchResponse) => Promise<T>,
   ): Promise<T> {
-    const url = await this.retry(getUrl);
+    const url = await this.retry(`${what} link`, getUrl);
     if (!url) throw new Error(`Stitch returned an empty ${what} URL for screen ${inner.id}`);
-    return this.retry(async () => {
+    return this.retry(`${what} download`, async () => {
       try {
         const res = await this.fetchUrl(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
         if (!res.ok) {

@@ -320,3 +320,49 @@ describe("AnthropicLlmClient", () => {
     expect(text(sent(create).messages[0].content)).toContain("`typography-001`");
   });
 });
+
+describe("runCommittee hooks", () => {
+  it("reports each critic as it finishes, with its score", async () => {
+    const done: { critic: CriticName; ok: boolean; score?: number }[] = [];
+    const llm: LlmClient = { critique: async (c) => stub(c) };
+    await runCommittee(input, CFG, llm, { onCritic: (critic, o) => done.push({ critic, ok: o.ok, score: o.ok ? o.score : undefined }) });
+    expect(done.map((d) => d.critic).sort()).toEqual(["accessibility", "behavioural", "feasibility", "typography"]);
+    expect(done.every((d) => d.ok && d.score === 70)).toBe(true);
+  });
+
+  it("says when a critic is being retried, and reports it once, after the retry", async () => {
+    const retries: string[] = [];
+    const finished: boolean[] = [];
+    let calls = 0;
+    const llm: LlmClient = {
+      critique: async (c) => {
+        if (c === "typography" && calls++ === 0) throw Object.assign(new Error("529 overloaded"), { status: 529 });
+        return stub(c);
+      },
+    };
+    await runCommittee(input, CFG, llm, {
+      onRetry: (c, e) => retries.push(`${c}: ${e}`),
+      onCritic: (c, o) => { if (c === "typography") finished.push(o.ok); },
+    });
+    expect(retries).toEqual(["typography: 529 overloaded"]);
+    expect(finished).toEqual([true]);
+  });
+
+  it("does not announce a retry for an error retrying cannot fix, and reports the critic as dropped", async () => {
+    const retries: string[] = [];
+    const dropped: string[] = [];
+    const llm: LlmClient = {
+      critique: async (c) => {
+        if (c === "feasibility") throw Object.assign(new Error("400 bad request"), { status: 400 });
+        return stub(c);
+      },
+    };
+    const r = await runCommittee(input, CFG, llm, {
+      onRetry: (c) => retries.push(c),
+      onCritic: (c, o) => { if (!o.ok) dropped.push(`${c}: ${o.error}`); },
+    });
+    expect(retries).toEqual([]);
+    expect(dropped).toEqual(["feasibility: 400 bad request"]);
+    expect(r.dropped).toEqual(["feasibility"]);
+  });
+});

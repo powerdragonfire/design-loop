@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { fileURLToPath } from "node:url";
 import { smoke, isSkipped, type SmokeReport } from "../../src/cli/smoke.js";
+import { recordProgress } from "../helpers/recordProgress.js";
 import { FakeGenerator, type Generator } from "../../src/stitch/adapter.js";
 import type { ChairClient } from "../../src/chair/chair.js";
 import type { LlmClient } from "../../src/critics/llm.js";
@@ -104,5 +105,25 @@ describe("smoke", () => {
     const r = await run({ chairClient: chairOf(new Error("400 betas: server-side-fallback-2026-07-01 is not available")) });
     expect(step(r, "chair call").ok).toBe(false);
     expect(step(r, "chair call").detail).toMatch(/fallbacks: false/);
+  });
+
+  it("shows each step as it starts and as it ends, numbered out of seven, in order", async () => {
+    const { progress, events } = recordProgress();
+    await run({ progress });
+    const begins = events.filter((e) => e.startsWith("begin ")).map((e) => e.slice(6));
+    expect(begins).toEqual(NAMES.map((n, i) => `${i + 1}/7 ${n}`));
+    // every step is closed before the next opens
+    expect(events.map((e) => e.split(" ")[0])).toEqual(NAMES.flatMap(() => ["begin", "done"]));
+    expect(events.at(-1)).toMatch(/^done 7\/7 cost: \$/);
+  });
+
+  it("closes a failing step as failed with its reason, and names a skipped step instead of beginning it", async () => {
+    const { progress, events } = recordProgress();
+    await run({ progress, llm: llmOf([used(0)], true), generator: brokenGenerator() });
+    expect(events).toContain("fail 1/7 critic call: 400 output_config.format is not supported");
+    expect(events).toContain("skipped 2/7 prompt cache: the critic call did not succeed, so there is nothing cached to hit");
+    expect(events.some((e) => e === "begin 2/7 prompt cache")).toBe(false);
+    expect(events.some((e) => e.startsWith("fail 4/7 stitch generate: Stitch is unreachable"))).toBe(true);
+    expect(events.some((e) => e.startsWith("skipped 5/7 stitch edit"))).toBe(true);
   });
 }, 120_000);

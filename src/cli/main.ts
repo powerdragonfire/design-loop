@@ -11,6 +11,7 @@ import { AnthropicLlmClient, type LlmClient } from "../critics/llm.js";
 import { buildReport, captureApproval } from "../report/report.js";
 import { createStitchGenerator, type Generator } from "../stitch/adapter.js";
 import { abDistiller, calibrate } from "./calibrate.js";
+import { createProgress, noProgress, type Progress, type ProgressMode } from "./progress.js";
 import { runScreen } from "./run.js";
 import { isSkipped, smoke } from "./smoke.js";
 
@@ -36,6 +37,8 @@ export interface Deps {
 export interface Io {
   out(line: string): void;
   err(line: string): void;
+  /** Builds the live progress reporter for a command; without one a command reports nothing but its results. */
+  makeProgress?(mode: ProgressMode): Progress;
 }
 
 const USAGE = `Usage: design-loop [--design <dir>] <command>
@@ -51,6 +54,8 @@ Commands:
 
 Options:
   --design <dir>                     the design folder (default: design)
+  --quiet                            print results only, no progress
+  --verbose                          also print token counts per call
   --date YYYY-MM-DD                  the run's date (default: today, UTC)
   --repeats N                        calibration repeats per screen (default: 5)`;
 
@@ -60,7 +65,7 @@ class UsageError extends Error {}
 const FAILED_AUTH = new Set([401, 403]);
 
 /** Production wiring: the real modules, for the design folder in use. Every field is replaceable in tests. */
-export function defaultDeps(designDir: string, io: Io): Deps {
+export function defaultDeps(designDir: string, io: Io, progress: Progress = noProgress): Deps {
   return {
     runScreen,
     buildReport,
@@ -68,7 +73,11 @@ export function defaultDeps(designDir: string, io: Io): Deps {
     calibrate,
     abDistiller,
     smoke,
-    makeGenerator: () => createStitchGenerator({ quotaDir: designDir }),
+    makeGenerator: () =>
+      createStitchGenerator({
+        quotaDir: designDir,
+        onRetry: (r) => progress.warn(`stitch ${r.what} failed, attempt ${r.attempt} of ${r.of} in ${r.waitMs / 1000}s: ${r.error.split("\n")[0]!.slice(0, 100)}`),
+      }),
     makeLlm: () => new AnthropicLlmClient(),
     makeChair: () => new AnthropicChairClient(),
     async committeePick(runDir) {
@@ -135,11 +144,11 @@ async function approve(d: Deps, io: Io, runDir: string, version: string, known?:
   io.out(`Approved ${version}: ${version === pick ? "agrees with" : `differs from (${pick})`} the committee's pick.`);
 }
 
-async function runCommand(d: Deps, io: Io, designDir: string, screen: string, date: string): Promise<number> {
-  await d.preflight();
+async function runCommand(d: Deps, io: Io, progress: Progress, designDir: string, screen: string, date: string): Promise<number> {
+  await progress.phase("check credentials", () => d.preflight());
   const generator = d.makeGenerator();
   const result = await d.runScreen({
-    designDir, screen, date, generator, llm: d.makeLlm(), chairClient: d.makeChair(), log: (line) => io.out(line),
+    designDir, screen, date, generator, llm: d.makeLlm(), chairClient: d.makeChair(), log: (line) => io.out(line), progress,
   });
   // The summary first: on a PAID run a failing report must not cost the operator the stop reason, the
   // versions, what was spent, or the exit-3 signal a script reads.
@@ -161,14 +170,15 @@ async function runCommand(d: Deps, io: Io, designDir: string, screen: string, da
  * did, and only a step that actually failed — not one that was skipped for want of an earlier step's
  * output — decides the exit code.
  */
-async function smokeCommand(d: Deps, io: Io, designDir: string): Promise<number> {
-  await d.preflight();
+async function smokeCommand(d: Deps, io: Io, progress: Progress, designDir: string): Promise<number> {
+  await progress.phase("check credentials", () => d.preflight());
   io.out("Checking the live services. This uses 2 Stitch generations and roughly $0.30 of Claude spend.");
   const report = await d.smoke({
     designDir,
     generator: d.makeGenerator(),
     llm: d.makeLlm(),
     chairClient: d.makeChair(),
+    progress,
   });
   let failed = false;
   for (const step of report.steps) {
@@ -198,12 +208,16 @@ async function reviewCommand(d: Deps, io: Io, runDir: string): Promise<number> {
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}): Promise<number> {
+  let progress: Progress = noProgress;
   try {
     let parsed;
     try {
       parsed = parseArgs({
         args: argv,
-        options: { design: { type: "string" }, date: { type: "string" }, repeats: { type: "string" }, help: { type: "boolean" } },
+        options: {
+          design: { type: "string" }, date: { type: "string" }, repeats: { type: "string" }, help: { type: "boolean" },
+          quiet: { type: "boolean" }, verbose: { type: "boolean" },
+        },
         allowPositionals: true,
         strict: true,
       });
@@ -223,19 +237,21 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
     only("date", "run");
     only("repeats", "calibrate");
 
+    if (values.quiet && values.verbose) throw new UsageError("--quiet and --verbose cannot be used together");
     const designDir = values.design ?? "design";
-    const d: Deps = { ...defaultDeps(designDir, io), ...overrides };
+    progress = io.makeProgress?.(values.quiet ? "quiet" : values.verbose ? "verbose" : "normal") ?? noProgress;
+    const d: Deps = { ...defaultDeps(designDir, io, progress), ...overrides };
 
     switch (command) {
       case "run": {
         need(1, "one argument: <screen>");
         const date = values.date ?? d.now().toISOString().slice(0, 10);
         if (!DATE.test(date)) throw new UsageError(`--date must be YYYY-MM-DD (got ${date})`);
-        return await runCommand(d, io, designDir, args[0]!, date);
+        return await runCommand(d, io, progress, designDir, args[0]!, date);
       }
       case "smoke":
         need(0, "no arguments");
-        return await smokeCommand(d, io, designDir);
+        return await smokeCommand(d, io, progress, designDir);
       case "report": {
         need(1, "one argument: <runDir>");
         const report = await d.buildReport(args[0]!);
@@ -254,7 +270,7 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
         need(0, "no arguments");
         const repeats = values.repeats === undefined ? undefined : Number(values.repeats);
         if (repeats !== undefined && !Number.isInteger(repeats)) throw new UsageError(`--repeats must be a whole number (got ${values.repeats})`);
-        const r = await d.calibrate({ designDir, llm: d.makeLlm(), repeats, log: (line) => io.out(line) });
+        const r = await d.calibrate({ designDir, llm: d.makeLlm(), repeats, log: (line) => io.out(line), progress });
         io.out(`sigma ${r.sigma.toFixed(2)} over ${r.repeats} repeats of ${r.screens.join(", ")} (written to ${join(designDir, "config.json")})`);
         for (const [critic, s] of Object.entries(r.perCritic)) io.out(`  ${critic}: ${s.toFixed(2)}`);
         io.out(`Cost: ${usd(r.usd)}`);
@@ -262,7 +278,7 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
       }
       case "ab-distiller": {
         need(0, "no arguments");
-        const r = await d.abDistiller({ designDir, llm: d.makeLlm(), log: (line) => io.out(line) });
+        const r = await d.abDistiller({ designDir, llm: d.makeLlm(), log: (line) => io.out(line), progress });
         io.out("Claims only the raw-HTML critique raised (add what they need to measure's STYLE_PROPS):");
         for (const s of r.screens) {
           io.out(`${s.screen}: ${s.rawOnly.length} raw-only`);
@@ -282,13 +298,27 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
     io.err(err instanceof Error ? err.message : String(err));
     if (process.env.DEBUG && err instanceof Error && err.stack) io.err(err.stack);
     return 1;
+  } finally {
+    progress.close();
   }
 }
 
 // Only when this file is the process entry point, never on import (the tests import it).
 const entry = process.argv[1] ? await realpath(process.argv[1]).catch(() => null) : null;
 if (entry !== null && import.meta.url === pathToFileURL(entry).href) {
-  const code = await main(process.argv.slice(2), { out: (l) => console.log(l), err: (l) => console.error(l) });
+  const code = await main(process.argv.slice(2), {
+    out: (l) => console.log(l),
+    err: (l) => console.error(l),
+    // Progress is for eyes, so it goes to stderr and leaves stdout to the results a script reads.
+    makeProgress: (mode) =>
+      createProgress({
+        write: (s) => process.stderr.write(s),
+        tty: Boolean(process.stderr.isTTY),
+        color: Boolean(process.stderr.isTTY) && !process.env.NO_COLOR && process.env.TERM !== "dumb",
+        columns: process.stderr.columns,
+        mode,
+      }),
+  });
   // Let both streams flush before exiting; open SDK sockets would otherwise keep the process alive.
   process.stdout.write("", () => process.stderr.write("", () => process.exit(code)));
 }

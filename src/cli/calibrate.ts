@@ -8,6 +8,7 @@ import { runCommittee, type CriticInput, type LlmClient } from "../critics/llm.j
 import { composite, renormalise } from "../scoring/score.js";
 import { writeAtomic } from "../store/store.js";
 import { costUsd } from "./pricing.js";
+import { committeeHooks, noProgress, type Progress } from "./progress.js";
 import type { Config, Contract, CriticName, Usage } from "../types.js";
 
 export interface CalibrationResult {
@@ -96,8 +97,10 @@ export async function calibrate(opts: {
   llm: LlmClient;
   repeats?: number;
   log?: (line: string) => void;
+  progress?: Progress;
 }): Promise<CalibrationResult> {
   const { designDir, llm, log } = opts;
+  const progress = opts.progress ?? noProgress;
   const repeats = opts.repeats ?? DEFAULT_REPEATS;
   if (!Number.isInteger(repeats) || repeats < 2) {
     throw new Error(`repeats must be an integer >= 2 (got ${repeats}): one sample has no spread`);
@@ -106,6 +109,10 @@ export async function calibrate(opts: {
   const cfg = contract.config;
   const reference = await readReference(designDir);
   priceCheck(cfg, llm);
+  progress.header([
+    `calibrate · design ${designDir}`,
+    `${reference.length} reference screen${reference.length === 1 ? "" : "s"} x ${repeats} repeats x 4 critics = ${reference.length * repeats * 4} critic calls · critic ${cfg.models.critic}`,
+  ]);
 
   const usage = noUsage();
   const composites: number[][] = [];
@@ -124,8 +131,13 @@ export async function calibrate(opts: {
     };
     const scores: number[] = [];
     const perCriticScores = new Map<CriticName, number[]>();
+    progress.banner(`${screen} · ${repeats} repeats`, { fraction: composites.length / reference.length });
     for (let r = 0; r < repeats; r++) {
-      const committee = await runCommittee(input, cfg, llm);
+      const committee = await progress.phase(
+        `${screen} repeat ${r + 1}/${repeats}`,
+        () => runCommittee(input, cfg, llm, committeeHooks(progress, false)),
+        (c) => `${c.critiques.length}/${c.critiques.length + c.failures.length} critics ok`,
+      );
       addUsage(usage, llm.takeUsage?.());
       if (committee.critiques.length === 0) {
         throw new Error(`committee unavailable: ${committee.failures.map((f) => `${f.critic}: ${f.error}`).join("; ")}`);
@@ -188,6 +200,7 @@ async function critiqueBoth(
   ref: ReferenceScreen,
   llm: LlmClient,
   usage: Usage,
+  progress: Progress,
 ): Promise<{ raw: AbIssue[]; digest: AbIssue[] }> {
   const doc = await measure(ref.html);
   const det = deterministicCritique(doc, contract.tokens);
@@ -198,8 +211,12 @@ async function critiqueBoth(
     openIssues: [],
     measurements: det.critique.issues.filter((i) => !i.id.startsWith("det-token-")),
   };
-  const run = async (digest: string): Promise<AbIssue[]> => {
-    const committee = await runCommittee({ ...base, digest }, contract.config, llm);
+  const run = async (what: string, digest: string): Promise<AbIssue[]> => {
+    const committee = await progress.phase(
+      `${ref.screen} ${what}`,
+      () => runCommittee({ ...base, digest }, contract.config, llm, committeeHooks(progress, false)),
+      (c) => `${c.critiques.length}/${c.critiques.length + c.failures.length} critics ok`,
+    );
     addUsage(usage, llm.takeUsage?.());
     // A run with no critic would make every issue of the other run look "only" in it.
     if (committee.critiques.length === 0) {
@@ -207,8 +224,8 @@ async function critiqueBoth(
     }
     return committee.critiques.flatMap((c) => c.issues.map((i) => ({ critic: c.critic, severity: i.severity, claim: i.claim })));
   };
-  const digestIssues = await run(distill(doc));
-  const rawIssues = await run(ref.html);
+  const digestIssues = await run("digest critique", distill(doc));
+  const rawIssues = await run("raw HTML critique", ref.html);
   return { raw: rawIssues, digest: digestIssues };
 }
 
@@ -222,16 +239,22 @@ export async function abDistiller(opts: {
   designDir: string;
   llm: LlmClient;
   log?: (line: string) => void;
+  progress?: Progress;
 }): Promise<AbResult> {
   const { designDir, llm, log } = opts;
+  const progress = opts.progress ?? noProgress;
   const contract = await loadContract(designDir, {}, undefined, { allowNullSigma: true });
   const reference = await readReference(designDir);
   priceCheck(contract.config, llm);
+  progress.header([
+    `ab-distiller · design ${designDir}`,
+    `${reference.length} reference screen${reference.length === 1 ? "" : "s"} x 2 critiques (digest, raw HTML) x 4 critics · critic ${contract.config.models.critic}`,
+  ]);
 
   const usage = noUsage();
   const screens: AbResult["screens"] = [];
   for (const ref of reference) {
-    const { raw, digest } = await critiqueBoth(contract, ref, llm, usage);
+    const { raw, digest } = await critiqueBoth(contract, ref, llm, usage, progress);
     const rawOnly = raw.filter((r) => !digest.some((d) => claimsMatch(r.claim, d.claim)));
     screens.push({ screen: ref.screen, rawIssues: raw, digestIssues: digest, rawOnly });
     log?.(`${ref.screen}: ${raw.length} raw issues, ${digest.length} digest issues, ${rawOnly.length} raw only`);

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { main, type Deps } from "../../src/cli/main.js";
+import { recordProgress } from "../helpers/recordProgress.js";
 
 const capture = () => {
   const out: string[] = []; const err: string[] = [];
@@ -219,5 +220,71 @@ describe("main", () => {
     const c = capture();
     expect(await main(["ab-distiller"], c.io, deps())).toBe(0);
     expect(c.out.join("\n")).toContain("letter spacing");
+  });
+});
+
+describe("progress wiring", () => {
+  const withProgress = () => {
+    const c = capture();
+    const rec = recordProgress();
+    const makeProgress = vi.fn((_mode: string) => rec.progress);
+    return { ...rec, makeProgress, io: { ...c.io, makeProgress }, out: c.out, err: c.err };
+  };
+
+  it.each([
+    [[], "normal"],
+    [["--quiet"], "quiet"],
+    [["--verbose"], "verbose"],
+  ])("builds the reporter for %j in %s mode", async (flags, mode) => {
+    const w = withProgress();
+    await main([...flags, "smoke"], w.io, deps());
+    expect(w.makeProgress).toHaveBeenCalledWith(mode);
+  });
+
+  it("refuses --quiet with --verbose, as a usage error", async () => {
+    const w = withProgress();
+    expect(await main(["--quiet", "--verbose", "smoke"], w.io, deps())).toBe(2);
+    expect(w.err.join("\n")).toMatch(/--quiet and --verbose/);
+    expect(w.makeProgress).not.toHaveBeenCalled();
+  });
+
+  it("hands the same reporter to run, smoke, calibrate and ab-distiller", async () => {
+    const w = withProgress(); const d = deps();
+    await main(["run", "home"], w.io, d);
+    await main(["smoke"], w.io, d);
+    await main(["calibrate"], w.io, d);
+    await main(["ab-distiller"], w.io, d);
+    for (const fn of [d.runScreen, d.smoke, d.calibrate, d.abDistiller]) {
+      expect(fn).toHaveBeenCalledWith(expect.objectContaining({ progress: w.progress }));
+    }
+  });
+
+  it("shows the credential check as its own step, before any spend", async () => {
+    const w = withProgress();
+    const order: string[] = [];
+    const d = deps({
+      preflight: vi.fn(async () => { order.push("preflight"); }),
+      runScreen: vi.fn(async () => { order.push("run"); return RESULT; }),
+    });
+    await main(["run", "home"], w.io, d);
+    expect(order).toEqual(["preflight", "run"]);
+    expect(w.events.slice(0, 2)).toEqual(["begin check credentials", "done check credentials"]);
+  });
+
+  it("closes the reporter after a command, and after one that fails", async () => {
+    const ok = withProgress();
+    await main(["smoke"], ok.io, deps());
+    expect(ok.events.at(-1)).toBe("close");
+    const bad = withProgress();
+    expect(await main(["run", "home"], bad.io, deps({ preflight: vi.fn(async () => { throw new Error("no key"); }) }))).toBe(1);
+    expect(bad.events).toContain("fail check credentials: no key");
+    expect(bad.events.at(-1)).toBe("close");
+  });
+
+  it("keeps progress off stdout: the results a script reads are exactly the ones printed before", async () => {
+    const w = withProgress();
+    await main(["run", "home"], w.io, deps());
+    expect(w.out.join("\n")).toMatch(/^Stop reason: pass/m);
+    expect(w.out.join("\n")).not.toMatch(/check credentials|begin |done /);
   });
 });

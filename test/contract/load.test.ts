@@ -48,7 +48,7 @@ describe("loadContract", () => {
     function withTokens(raw: string): string {
       const dir = mkdtempSync(join(tmpdir(), "design-loop-contract-"));
       tmpDirs.push(dir);
-      cpSync(FIX, dir, { recursive: true });
+      cpSync(FIX, dir, { recursive: true, filter: (src) => !src.includes(".design-loop") });
       writeFileSync(join(dir, "tokens.json"), raw);
       return dir;
     }

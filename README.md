@@ -39,12 +39,39 @@ design/
 | `smoke` | Calls every live service once — a critic call, the same call again to prove the prompt cache hits, a chair call, a Stitch generate AND edit, then `measure()` on the real Stitch page — and prints PASS/FAIL/SKIP per step. Run it first. | 2 Stitch generations, ~$0.30 |
 | `calibrate [--repeats N]` | Scores each `reference/` screen N times and writes the composite's noise floor into `config.json` as `sigma`, plus `.design-loop/calibration.json`. Re-run it after changing the critic model or the weights. | ~$2.20 at 5 repeats |
 | `ab-distiller` | Critiques each reference screen twice, once from the digest and once from raw HTML, and lists the claims only the raw HTML produced. Whatever it lists is a field `measure`'s `STYLE_PROPS` is missing. | ~$8 |
-| `run <screen> [--date YYYY-MM-DD]` | The loop itself. Prints each round, then the stop reason, the versions, the spend and the report path. | ~$0.58 per screen, see the caveat below |
+| `run <screen> [--date YYYY-MM-DD]` | The loop itself. Shows each step live, then prints the stop reason, the versions, the spend and the report path. | ~$0.58 per screen, see the caveat below |
 | `review <runDir>` | Builds the report, opens it, and asks which version to approve. | free |
 | `report <runDir>` | Builds the report page and opens it, approving nothing. | free |
 | `approve <runDir> <version>` | Records your pick in the manifest and in `vNN/approved.json`. | free |
 
 `smoke`, `calibrate`, `ab-distiller` and `run` need credentials; the rest read the run directory only.
+
+## Watching a run
+
+Every command that spends money shows what it is doing as it does it, on **stderr**. The results (stop reason,
+versions, spend, PASS/FAIL lines) stay on stdout, so `> results.txt` captures exactly those.
+
+```
+run home · design ../What-Now/design
+critic claude-sonnet-5 · chair claude-opus-5 · sigma 1.8 · up to 5 edits
+── v00 · first generation  ░░░░░░░░░░░░░░░░  $0.00 so far · 0 Stitch generations ──
+✓ stitch generate            0:58
+✓ fetch html + image        401ms  41 KB html, 212 KB png
+✓ measure                   600ms  1204 nodes
+  ✓ typography        71  0:12
+  ✓ layout            64  0:14
+✓ critics                    0:31  4/4 ok
+⠹ chair                      0:07  ← a live spinner and clock on a terminal
+```
+
+- **On a terminal** the current step is one live line with a spinner and a clock. **When piped** (CI, `| tee`,
+  an agent) there are no control characters: timestamped `[13:31:02]` lines, and a `… still waiting on <step>`
+  heartbeat every 30 seconds so a long Stitch wait does not look like a hang.
+- **Retries show up**: `! stitch generate failed, attempt 2 of 3 in 1s: 503 …`, `! layout critic failed, retrying once`.
+- `--quiet` prints results only. `--verbose` adds token counts per call. They cannot be combined.
+- Every event is also written to `<runDir>/events.jsonl` (one JSON object per line: time, step, duration, detail),
+  even with `--quiet`. From another terminal: `tail -f runs/<date>-<screen>/events.jsonl`.
+- `smoke` shows its seven steps as `1/7 … 7/7`; `calibrate` shows each repeat as `home repeat 2/5`.
 
 ## Reading the report
 

@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { calibrate, abDistiller } from "../../src/cli/calibrate.js";
 import type { LlmClient } from "../../src/critics/llm.js";
+import { recordProgress } from "../helpers/recordProgress.js";
 import type { CriticName } from "../../src/types.js";
 
 const FIX = new URL("../fixtures/design/", import.meta.url).pathname;
 let dir: string;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "dl-")); cpSync(FIX, dir, { recursive: true }); });
+beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "dl-")); cpSync(FIX, dir, { recursive: true, filter: (src) => !src.includes(".design-loop") }); });
 
 // Score depends on the screen (so screens truly differ) and, optionally, on how many
 // times THIS critic has seen THIS screen (so repeats can vary).
@@ -26,6 +27,16 @@ const llmOf = (base: Record<string, number>, wobble: number[] = [0]): LlmClient 
 const BASE = { a: 60, b: 90, c: 75 };
 
 describe("calibrate", () => {
+  it("shows a step per repeat of each screen, and says what it is about to spend", async () => {
+    const { progress, events } = recordProgress();
+    await calibrate({ designDir: dir, llm: llmOf(BASE), repeats: 2, progress });
+    expect(events[0]).toMatch(/^header calibrate/);
+    expect(events[1]).toMatch(/^header 3 reference screens x 2 repeats x 4 critics = 24 critic calls/);
+    const begins = events.filter((e) => e.startsWith("begin "));
+    expect(begins).toEqual(["a", "b", "c"].flatMap((s) => [`begin ${s} repeat 1/2`, `begin ${s} repeat 2/2`]));
+    expect(events.filter((e) => e.startsWith("done ")).every((e) => e.endsWith(": 4/4 critics ok"))).toBe(true);
+  });
+
   it("reports sigma zero when repeats agree, even though the screens differ", async () => {
     const out = await calibrate({ designDir: dir, llm: llmOf(BASE), repeats: 3 });
     expect(out.sigma).toBeCloseTo(0, 9);
@@ -102,6 +113,15 @@ describe("calibrate", () => {
 }, 120_000);
 
 describe("abDistiller", () => {
+  it("shows the digest and the raw-HTML critique of each screen as separate steps", async () => {
+    const { progress, events } = recordProgress();
+    await abDistiller({ designDir: dir, llm: llmOf(BASE), progress });
+    expect(events[1]).toMatch(/^header 3 reference screens x 2 critiques \(digest, raw HTML\) x 4 critics/);
+    expect(events.filter((e) => e.startsWith("begin "))).toEqual(
+      ["a", "b", "c"].flatMap((s) => [`begin ${s} digest critique`, `begin ${s} raw HTML critique`]),
+    );
+  });
+
   // The raw-HTML run gets one extra issue about letter-spacing that the digest run misses.
   const abLlm = (): LlmClient => ({
     critique: async (critic, input) => {

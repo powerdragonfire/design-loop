@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { loadContract } from "../contract/load.js";
 import { measure } from "../measure/measure.js";
 import { deterministicCritique } from "../critics/deterministic.js";
@@ -14,6 +15,7 @@ import { readCalibration, type Calibration } from "./calibration.js";
 import { costUsd } from "./pricing.js";
 import { groupTokenIssues } from "./group.js";
 import { buildFirstPrompt } from "./prompt.js";
+import { committeeHooks, noProgress, type Progress } from "./progress.js";
 import type { CriticName, Critique, Issue, MeasuredDoc, Usage } from "../types.js";
 
 export interface RunOptions {
@@ -26,6 +28,8 @@ export interface RunOptions {
   /** Where the Stitch quota counter lives; defaults to `designDir`. */
   quotaDir?: string;
   log?: (line: string) => void;
+  /** What a person watching sees: each step as it starts and ends, with how long it took. */
+  progress?: Progress;
 }
 
 export interface RunResult {
@@ -59,6 +63,7 @@ const isDeterministic = (i: Issue): boolean => i.id.startsWith("det-");
 
 export async function runScreen(opts: RunOptions): Promise<RunResult> {
   const { designDir, screen, date, generator, llm, chairClient, log } = opts;
+  const progress = opts.progress ?? noProgress;
 
   // Everything that can fail cheaply fails here: before any spend and before any directory exists.
   const contract = await loadContract(designDir, {}, screen);
@@ -81,6 +86,12 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   // a noise floor measured for another model, other weights or another number says so, loudly (spec §16).
   const calibration = await readCalibration(designDir, cfg, sigma, log);
   const run = await openRun(designDir, screen, date);
+  progress.header([
+    `run ${screen} · design ${designDir}`,
+    `critic ${cfg.models.critic} · chair ${cfg.models.chair} · sigma ${sigma} · up to ${cfg.maxRounds} edits`,
+    `Stitch ${quota.used}/${MONTHLY_LIMIT} used this month · results in ${run.dir}`,
+  ]);
+  progress.attachLog(join(run.dir, "events.jsonl"));
 
   const rounds: RoundRecord[] = [];
   const records = new Map<string, VersionRecord>();
@@ -100,9 +111,12 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     try {
       return await chair(input, cfg, chairClient);
     } finally {
-      addUsage(chairUsage, chairClient.takeUsage?.());
+      const tokens = chairClient.takeUsage?.();
+      addUsage(chairUsage, tokens);
+      if (tokens) progress.debug(`  chair tokens: ${tokens.inputTokens} in, ${tokens.outputTokens} out, ${tokens.cachedTokens} cached`);
     }
   };
+  const spentSoFar = (): number => costUsd(cfg.models.critic, criticUsage) + costUsd(cfg.models.chair, chairUsage);
 
   const loop = async (): Promise<{ stop: StopReason; best: string }> => {
     let prompt = buildFirstPrompt(contract, screen);
@@ -112,27 +126,45 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     let changes: { requested: number; applied: Issue[] } | undefined;
     for (let n = 0; ; n++) {
       const version = `v${String(n).padStart(2, "0")}`;
-      const handle: Screen = baseHandle ? await baseHandle.edit(prompt) : await generator.generate(prompt);
+      progress.banner(n === 0 ? `${version} · first generation` : `${version} · edit ${n} of at most ${cfg.maxRounds}`, {
+        fraction: n / cfg.maxRounds,
+        status: `$${spentSoFar().toFixed(2)} so far · ${stitchGenerations} Stitch generation${stitchGenerations === 1 ? "" : "s"}`,
+      });
+      const handle: Screen = await progress.phase(
+        n === 0 ? "stitch generate" : "stitch edit",
+        () => (baseHandle ? baseHandle.edit(prompt) : generator.generate(prompt)),
+      );
       stitchGenerations++;
-      const html = await handle.getHtml();
-      const png = await handle.getImage();
-      const doc = await measure(html);
+      const [html, png] = await progress.phase(
+        "fetch html + image",
+        async () => [await handle.getHtml(), await handle.getImage()] as const,
+        ([h, p]) => `${Math.round(h.length / 1024)} KB html, ${Math.round(p.length / 1024)} KB png`,
+      );
+      const doc = await progress.phase("measure", () => measure(html), (d) => `${d.nodes.length} nodes`);
       const det = deterministicCritique(doc, contract.tokens);
       const digest = distill(doc);
 
-      const committee = await runCommittee(
-        {
-          contract,
-          screen,
-          digest,
-          imagePng: png,
-          openIssues: carried,
-          measurements: det.critique.issues.filter((i) => !i.id.startsWith("det-token-")),
-        },
-        cfg,
-        llm,
+      const committee = await progress.phase(
+        "critics",
+        () =>
+          runCommittee(
+            {
+              contract,
+              screen,
+              digest,
+              imagePng: png,
+              openIssues: carried,
+              measurements: det.critique.issues.filter((i) => !i.id.startsWith("det-token-")),
+            },
+            cfg,
+            llm,
+            committeeHooks(progress, true),
+          ),
+        (c) => `${c.critiques.length}/${c.critiques.length + c.failures.length} ok`,
       );
-      addUsage(criticUsage, llm.takeUsage?.());
+      const criticTokens = llm.takeUsage?.();
+      addUsage(criticUsage, criticTokens);
+      if (criticTokens) progress.debug(`  critics tokens: ${criticTokens.inputTokens} in, ${criticTokens.outputTokens} out, ${criticTokens.cachedTokens} cached`);
       for (const f of committee.failures) degradations.push({ version, critic: f.critic, error: f.error });
       // The deterministic critique alone is not a review: without one LLM critic the round is not scored (spec §14).
       if (committee.critiques.length === 0) {
@@ -183,11 +215,14 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
           }
         : { critiques: last.critiques, openIssues: groupTokenIssues(last.open), imagePng: last.png, tokens: contract.tokens, regression: null };
 
+      const chairPhase = (): Promise<Awaited<ReturnType<typeof askChair>>> =>
+        progress.phase("chair", () => askChair(chairInput), (c) => `${c.changes.length} change${c.changes.length === 1 ? "" : "s"} asked of Stitch`);
       let next;
       try {
-        next = await askChair(chairInput);
+        next = await chairPhase();
       } catch {
-        next = await askChair(chairInput);
+        progress.warn("chair failed, retrying once");
+        next = await chairPhase();
       }
       if (next.requested > next.changes.length) {
         log?.(`chair returned ${next.requested} changes; keeping the top ${next.changes.length}`);

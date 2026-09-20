@@ -35,15 +35,35 @@ export interface CommitteeResult {
 const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 422]);
 const retryable = (e: unknown): boolean => !NON_RETRYABLE_STATUS.has((e as { status?: number } | null)?.status as number);
 
-export async function runCommittee(input: CriticInput, cfg: Config, llm: LlmClient): Promise<CommitteeResult> {
+/** What a person watching the run sees of the committee; every hook is optional and none can change the result. */
+export interface CommitteeHooks {
+  /** A critic finished, after its retry if it needed one. */
+  onCritic?(critic: CriticName, outcome: { ok: true; score: number; ms: number } | { ok: false; error: string; ms: number }): void;
+  /** A critic's first attempt failed in a way worth a second. */
+  onRetry?(critic: CriticName, error: string): void;
+}
+
+const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+export async function runCommittee(input: CriticInput, cfg: Config, llm: LlmClient, hooks?: CommitteeHooks): Promise<CommitteeResult> {
   const model = cfg.models.critic;
   // One retry per critic, inline, so a retry does not wait for the slowest sibling.
   const attempt = async (c: LlmCriticName): Promise<Critique> => {
+    const started = Date.now();
     try {
-      return await llm.critique(c, input, model);
+      let critique: Critique;
+      try {
+        critique = await llm.critique(c, input, model);
+      } catch (e) {
+        if (!retryable(e)) throw e;
+        hooks?.onRetry?.(c, messageOf(e));
+        critique = await llm.critique(c, input, model);
+      }
+      hooks?.onCritic?.(c, { ok: true, score: critique.score, ms: Date.now() - started });
+      return critique;
     } catch (e) {
-      if (!retryable(e)) throw e;
-      return await llm.critique(c, input, model);
+      hooks?.onCritic?.(c, { ok: false, error: messageOf(e), ms: Date.now() - started });
+      throw e;
     }
   };
   const settled = await Promise.allSettled(LLM_CRITICS.map(attempt));

@@ -47,9 +47,11 @@ Below, `dl <command>` means that whole line.
 Tell the user the cost first: **about $1–2 per screen** plus Stitch generations from the free-tier pool (edits count).
 On their yes:
 
-`dl run <screen>` — use `run_in_background` and the maximum timeout; a run takes minutes. Read the output when it
-finishes. It prints each round, the stop reason, the versions, the spend and the run directory
-(`<design>/runs/<date>-<screen>`).
+`dl run <screen>` — use `run_in_background` and the maximum timeout; a run takes minutes. It prints timestamped
+step lines on stderr as it goes (`stitch generate`, `critics`, `chair`, and a `… still waiting` heartbeat every 30s),
+and the stop reason, versions, spend and run directory (`<design>/runs/<date>-<screen>`) on stdout. To report
+progress while it runs, read the background output; to see what happened after a crash, read
+`<runDir>/events.jsonl`. Don't kill a run that is only waiting.
 
 Stop reasons: `pass` (no open blockers or majors), `converged` (two rounds without a real improvement),
 `budget` (hit the round cap), `aborted` (exit 3 — saved versions are kept and still reviewable).

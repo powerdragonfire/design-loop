@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { runScreen } from "../../src/cli/run.js";
+import { recordProgress } from "../helpers/recordProgress.js";
 import { FakeGenerator } from "../../src/stitch/adapter.js";
 import { reserve, MONTHLY_LIMIT } from "../../src/stitch/quota.js";
 import type { CriticInput, LlmClient } from "../../src/critics/llm.js";
@@ -12,7 +13,7 @@ import type { CriticName, Critique, Issue } from "../../src/types.js";
 
 const FIX = new URL("../fixtures/design/", import.meta.url).pathname;
 const DATE = "2026-09-18";
-const setup = () => { const d = mkdtempSync(join(tmpdir(), "dl-")); cpSync(FIX, d, { recursive: true }); return d; };
+const setup = () => { const d = mkdtempSync(join(tmpdir(), "dl-")); cpSync(FIX, d, { recursive: true, filter: (src) => !src.includes(".design-loop") }); return d; };
 const runDir = (d: string) => join(d, "runs", `${DATE}-home`);
 const manifest = (d: string) => JSON.parse(readFileSync(join(runDir(d), "manifest.json"), "utf8"));
 const readJson = (p: string) => JSON.parse(readFileSync(p, "utf8"));
@@ -383,5 +384,80 @@ describe("runScreen", () => {
     expect(text).toMatch(/WARNING.*calibration\.json/i);
     expect(manifest(dir).calibration).toBeNull();
     expect(manifest(dir).stopReason).toBe("pass");
+  });
+
+  describe("progress", () => {
+    const strip = (events: string[]) => events.filter((e) => !e.startsWith("header ") && !e.startsWith("log "));
+
+    it("opens with what is about to run and attaches the event log inside the run directory", async () => {
+      const dir = setup(); const { progress, events } = recordProgress();
+      await run(dir, new FakeGenerator([shot(48)]), llmOf([90]).llm, chairOf().client, { progress });
+      expect(events[0]).toMatch(/^header run home · design /);
+      expect(events[1]).toMatch(/^header critic claude-sonnet-5 · chair claude-opus-5 · sigma 3 · up to \d+ edits$/);
+      expect(events[2]).toMatch(new RegExp(`^header Stitch \\d+/${MONTHLY_LIMIT} used this month · results in ${runDir(dir)}$`));
+      expect(events[3]).toBe(`log ${join(runDir(dir), "events.jsonl")}`);
+    });
+
+    it("shows every step of a two-version run in order, each opened and closed before the next", async () => {
+      const dir = setup(); const { progress, events } = recordProgress();
+      await run(dir, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 80]).llm, chairOf().client, { progress });
+      const steps = events
+        .filter((e) => /^(banner|begin|done) /.test(e))
+        .map((e) => e.replace(/: .*$/, "").replace(/ @[\d.]+$/, ""));
+      const scored = ["begin fetch html + image", "done fetch html + image", "begin measure", "done measure", "begin critics", "done critics"];
+      expect(steps).toEqual([
+        "banner v00 · first generation", "begin stitch generate", "done stitch generate", ...scored,
+        "begin chair", "done chair",
+        "banner v01 · edit 1 of at most 5", "begin stitch edit", "done stitch edit", ...scored,
+      ]);
+    });
+
+    it("gives the bar the share of edits used, and the status the spend so far", async () => {
+      const dir = setup(); const { progress, events } = recordProgress();
+      await run(dir, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 80]).llm, chairOf().client, { progress });
+      const banners = events.filter((e) => e.startsWith("banner "));
+      expect(banners).toEqual(["banner v00 · first generation @0", "banner v01 · edit 1 of at most 5 @0.2"]);
+    });
+
+    it("says what each step found, so a person can tell it is working", async () => {
+      const dir = setup(); const { progress, events } = recordProgress();
+      await run(dir, new FakeGenerator([shot(48)]), llmOf([90]).llm, chairOf().client, { progress });
+      expect(events).toContainEqual(expect.stringMatching(/^done fetch html \+ image: \d+ KB html, \d+ KB png$/));
+      expect(events).toContainEqual(expect.stringMatching(/^done measure: \d+ nodes$/));
+      expect(events).toContain("done critics: 4/4 ok");
+    });
+
+    it("shows each critic as it finishes, and a dropped one with its reason", async () => {
+      const dir = setup(); const { progress, events } = recordProgress();
+      const llm = llmOf([80], (critic) => (critic === "feasibility" ? Object.assign(new Error("400 no"), { status: 400 }) : undefined)).llm;
+      await run(dir, new FakeGenerator([shot(48)]), llm, chairOf().client, { progress });
+      expect(events).toContainEqual(expect.stringMatching(/^info {3}✓ typography\s+80/));
+      expect(events).toContainEqual(expect.stringMatching(/^info {3}✗ feasibility\s+dropped: 400 no$/));
+      expect(events).toContain("done critics: 3/4 ok");
+    });
+
+    it("warns that the chair is being retried, and still finishes", async () => {
+      const dir = setup(); const { progress, events } = recordProgress();
+      const out = await run(dir, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 80]).llm, chairOf(1).client, { progress });
+      expect(out.versions).toBe(2);
+      expect(events).toContain("fail chair: chair down");
+      expect(events).toContain("warn chair failed, retrying once");
+      expect(events.filter((e) => e.startsWith("done chair"))).toHaveLength(1);
+    });
+
+    it("prints token counts only through debug, which the reporter drops unless verbose", async () => {
+      const dir = setup(); const { progress, events } = recordProgress();
+      await run(dir, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 80]).llm, chairOf().client, { progress });
+      expect(events).toContain("debug   critics tokens: 1000 in, 100 out, 0 cached");
+      expect(events).toContain("debug   chair tokens: 500 in, 50 out, 0 cached");
+    });
+
+    it("leaves the run itself unchanged: the same versions and manifest with or without a reporter", async () => {
+      const a = setup(); const b = setup();
+      const withP = await run(a, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 80]).llm, chairOf().client, { progress: recordProgress().progress });
+      const without = await run(b, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 80]).llm, chairOf().client);
+      expect({ ...withP, runDir: "" }).toEqual({ ...without, runDir: "" });
+      expect(manifest(a).committeeRank).toEqual(manifest(b).committeeRank);
+    });
   });
 }, 240_000);

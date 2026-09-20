@@ -61,6 +61,18 @@ design/
 - A banner appears when a critic was dropped from a round, or when a version directory was incomplete.
 - The page cannot approve for you: it prints the `approve` command to paste into a terminal.
 
+## Claude Code skill
+
+`skills/design-loop/SKILL.md` lets Claude drive this CLI for you. Install it once:
+
+```
+ln -s "$PWD/skills/design-loop" ~/.claude/skills/design-loop
+```
+
+Then ask Claude to "design the home screen with design-loop". It runs the commands above, summarises the report,
+and waits for you to name the version to approve. It never approves on its own. If the tool lives somewhere other
+than `~/Projects/design-loop`, set `DESIGN_LOOP_HOME`.
+
 ## Exit codes
 
 - `0` — done.

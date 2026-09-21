@@ -51,4 +51,20 @@ describe("staleAgents", () => {
     writeFileSync(join(dir, "design-loop-typography.md"), "hand-edited");
     expect(await staleAgents({ outDir: dir })).toEqual(["design-loop-typography"]);
   });
+
+  // A full-content overwrite (above) destroys any trailing marker along with everything else, so it can't
+  // tell a real content check apart from one that only remembers "has this been regenerated since the rubric
+  // last changed". Edit one field instead — `tools:` carries a security-relevant guarantee (no WebFetch, no
+  // WebSearch) — and leave the rest of the file, including its last line, untouched.
+  it("notices a hand-added tool even when the rest of the file is untouched", async () => {
+    const dir = outDir();
+    await syncAgents({ outDir: dir });
+    const file = join(dir, "design-loop-typography.md");
+    const edited = readFileSync(file, "utf8").replace(
+      "tools: Read, Grep, Glob, Write, Bash",
+      "tools: Read, Grep, Glob, Write, Bash, WebFetch",
+    );
+    writeFileSync(file, edited);
+    expect(await staleAgents({ outDir: dir })).toEqual(["design-loop-typography"]);
+  });
 });

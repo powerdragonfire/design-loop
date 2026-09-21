@@ -42,12 +42,39 @@ design/
 | `smoke` | Calls every live service once — a critic call, the same call again to prove the prompt cache hits, a chair call, a Stitch generate AND edit, then `measure()` on the real Stitch page — and prints PASS/FAIL/SKIP per step. Run it first. | 2 Stitch generations, ~$0.30 |
 | `calibrate [--repeats N]` | Scores each `reference/` screen N times and writes the composite's noise floor into `config.json` as `sigma`, plus `.design-loop/calibration.json`. Re-run it after changing the critic model or the weights. | ~$2.20 at 5 repeats |
 | `ab-distiller` | Critiques each reference screen twice, once from the digest and once from raw HTML, and lists the claims only the raw HTML produced. Whatever it lists is a field `measure`'s `STYLE_PROPS` is missing. | ~$8 |
-| `run <screen> [--date YYYY-MM-DD]` | Generates `families × (1 + variantsPerFamily)` candidates (config's `candidates` section), scores and selects one, promotes it to `v00`, then the edit loop. Shows each step live, then prints the stop reason, the versions, the spend and the report path. | ~$2.30 per screen at the 2×3 default, see the caveat below |
+| `run <screen> [--date YYYY-MM-DD]` | Generates `families × (1 + variantsPerFamily)` candidates (config's `candidates` section — see [Generating more than one candidate](#generating-more-than-one-candidate); the default, `families: 1, variantsPerFamily: 0`, is one generation, today's behaviour), scores and selects one, promotes it to `v00`, then the edit loop. Shows each step live, then prints the stop reason, the versions, the spend and the report path. | ~$1.06 per screen by default; ~$2.30 with the six-candidate example below, see the caveat there |
 | `review <runDir>` | Builds the report, opens it, and asks which version to approve. | free |
 | `report <runDir>` | Builds the report page and opens it, approving nothing. | free |
 | `approve <runDir> <vNN\|cN>` | Records your pick — a version or a candidate — in the manifest and in `vNN/approved.json` or `candidates/<id>/approved.json`. | free |
 
 `smoke`, `calibrate`, `ab-distiller` and `run` need credentials; the rest read the run directory only.
+
+## Generating more than one candidate
+
+Left alone, `run` does exactly what it always has: one Stitch generation, iterated by the edit loop. To have
+it generate several independent readings of the screen spec and let the committee pick the best one before
+the edit loop starts, add a `candidates` block to `config.json`:
+
+```json
+"candidates": {
+  "families": 2,
+  "variantsPerFamily": 2,
+  "creativeRange": "EXPLORE",
+  "aspects": ["LAYOUT", "COLOR_SCHEME"]
+}
+```
+
+`families` is how many independent first generations to make — each from the bare spec, or from the spec plus
+one `## ` section of `directions.md` if that file has enough sections. `variantsPerFamily` (0–5) asks Stitch for
+that many variants of each family's generation via `generate_variants`, which nudges `aspects` within
+`creativeRange`. The block above makes `2 × (1 + 2) = 6` candidates from two art directions. Every candidate is
+measured and critiqued the same way a round is; the winner is copied to `v00` and the loop iterates it exactly
+as before.
+
+|  | default (no `candidates` block) | the block above |
+| --- | --- | --- |
+| Stitch generations | 1 + up to `maxRounds` | 6 + up to `maxRounds` |
+| Cost per screen | ~$1.06 | ~$2.30 |
 
 ## Watching a run
 
@@ -57,7 +84,7 @@ versions, spend, PASS/FAIL lines) stay on stdout, so `> results.txt` captures ex
 ```
 run home · design ../What-Now/design
 critic claude-sonnet-5 · chair claude-opus-5 · sigma 1.8 · up to 5 edits
-── v00 · first generation  ░░░░░░░░░░░░░░░░  $0.00 so far · 0 Stitch generations ──
+── candidates · 1 generated  ░░░░░░░░░░░░░░░░ ──
 ✓ stitch generate            0:58
 ✓ fetch html + image        401ms  41 KB html, 212 KB png
 ✓ measure                   600ms  1204 nodes
@@ -121,10 +148,10 @@ than `~/Projects/design-loop`, set `DESIGN_LOOP_HOME`.
 - **`batchMode: true` is rejected at load.** Batch critiquing is not implemented.
 - **Stitch's free tier is counted as one pool of 550.** It is really 350 Flash plus 200 Pro; this tool keeps
   one counter and warns at 80%. Edits count as generations.
-- **The ~$2.30 per screen (six generations at the 2×3 default, plus edits) is likely to be optimistic on real
-  pages.** A real Stitch screen has far more nodes than the fixtures, and the digest is sent to four critics
-  every candidate and every round. `smoke` prints the projected cost from the digest it actually measured —
-  trust that number, and re-baseline from what `calibrate` cost.
+- **Both cost figures above are likely to be optimistic on real pages**, whether you're on the one-candidate
+  default or the six-candidate example. A real Stitch screen has far more nodes than the fixtures, and the
+  digest is sent to four critics every candidate and every round. `smoke` prints the projected cost from the
+  digest it actually measured — trust that number, and re-baseline from what `calibrate` cost.
 - **Aliases in `tokens.json` are skipped, not resolved.** A leaf like `"{base.radius}"` leaves that category
   unchecked for the value rather than being treated as a literal.
 - **A critic must cite a selector that exists.** Issues citing anything else are dropped and counted as the

@@ -473,6 +473,31 @@ describe("runScreen", () => {
       expect(generate).toBe(1);
       expect(variants).toBe(0);
     });
+
+    it("reports a non-empty hallucination rate for a run that stops at v00", async () => {
+      // Before spec fix 1, a run that never reached the edit loop finalised with hallucinationRate: {}
+      // because selectCandidate computed it and threw it away; only the loop ever tallied it.
+      const dir = setup(); const gen = new FakeGenerator([shot(48)]);
+      const out = await run(dir, gen, llmOf([90]).llm, chairOf().client);
+      expect(out.stopReason).toBe("pass");
+      expect(out.versions).toBe(1);
+      const rates = manifest(dir).hallucinationRate;
+      expect(Object.keys(rates).length).toBeGreaterThan(0);
+    });
+
+    it("keeps every generated candidate on disk even when the whole committee fails", async () => {
+      // Before spec fix 3, pickWinner's throw propagated out of selectCandidate before run.ts ever got
+      // the rows to write, so a bad-credentials run spent every candidate generation and wrote nothing.
+      const denied = Object.assign(new Error("invalid x-api-key"), { status: 401 });
+      const o = opts(
+        { candidates: { families: 2, variantsPerFamily: 0 } },
+        { generator: new FakeGenerator([shot(48), shot(48)]), llm: llmOf([90], () => denied).llm },
+      );
+      await expect(runScreen(o)).rejects.toThrow(/no candidate could be scored/);
+      const dir = runDir(o.designDir);
+      expect(existsSync(join(dir, "candidates", "c0", "screen.png"))).toBe(true);
+      expect(existsSync(join(dir, "candidates", "c1", "screen.png"))).toBe(true);
+    });
   });
 
   describe("progress", () => {

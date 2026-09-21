@@ -115,6 +115,7 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem;margin:0}d
 .candidate-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px;margin-top:.5rem}
 .candidate{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:0}
 .candidate.winner{border:2px solid var(--good)}
+.candidate.approved{border:2px solid var(--accent)}
 .head{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-bottom:.5rem}
 img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:6px}
 .badge,.tag,.sev,.chip{display:inline-block;font-size:.75rem;font-weight:600;padding:.05rem .5rem;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
@@ -198,7 +199,11 @@ function versionSection(v: VersionView, prev: VersionView | null, parent: Versio
     approved ? `<span class="badge approved">Approved by you</span>` : "",
   ].join("");
   const delta = prev ? signed(v.composite - prev.composite) : "—";
-  const dropped = (m?.degradations ?? []).filter((d) => d.version === v.name);
+  // v00 is a promoted candidate, not a scored round of its own: a critic dropped while it was still
+  // c<N> is recorded under that candidate id, not "v00". Only v00 can have come from a candidate, so
+  // only it needs the extra name.
+  const dropNames = v.name === "v00" && m?.selection?.winner ? [v.name, m.selection.winner] : [v.name];
+  const dropped = (m?.degradations ?? []).filter((d) => dropNames.includes(d.version));
   const gate = v.gatePass
     ? `<p class="gate ok">Gate: passed</p>`
     : `<p class="gate fail">Gate: not passed — ${esc(gateReasons(v.open).join("; "))}</p>`;
@@ -229,17 +234,22 @@ async function readCandidatePng(runDir: string, id: string): Promise<string | nu
   }
 }
 
-function candidateCell(c: CandidateSummary, isWinner: boolean, png: string | null): string {
+function candidateCell(c: CandidateSummary, isWinner: boolean, isApproved: boolean, png: string | null, runDir: string): string {
   const gate = c.failed
     ? `<p class="gate fail">Committee unavailable: ${esc(c.failed)}</p>`
     : c.gatePass
       ? `<p class="gate ok">Gate: passed</p>`
       : `<p class="gate fail">Gate: not passed</p>`;
-  return `<div class="candidate${isWinner ? " winner" : ""}" data-candidate="${esc(c.id)}">
-<div class="head"><h3>${esc(c.id)}</h3><span class="chip">family ${esc(c.family)}</span>${isWinner ? `<span class="badge pick">Winner</span>` : ""}</div>
+  const badges = [
+    isWinner ? `<span class="badge pick">Winner</span>` : "",
+    isApproved ? `<span class="badge approved">Approved by you</span>` : "",
+  ].join("");
+  return `<div class="candidate${isWinner ? " winner" : ""}${isApproved ? " approved" : ""}" data-candidate="${esc(c.id)}">
+<div class="head"><h3>${esc(c.id)}</h3><span class="chip">family ${esc(c.family)}</span>${badges}</div>
 ${png ? `<img src="data:image/png;base64,${png}" alt="Screenshot of candidate ${esc(c.id)}">` : `<p class="muted">Screenshot unavailable</p>`}
 <p><span class="score">${num(c.composite)}</span><span class="delta">${c.blockers} blocker${c.blockers === 1 ? "" : "s"}</span></p>
 ${gate}
+${command(`design-loop approve ${shellQuote(runDir)} ${c.id}`)}
 </div>`;
 }
 
@@ -253,7 +263,9 @@ async function candidateGallery(m: ManifestView, runDir: string): Promise<string
   if (candidates.length === 0) return "";
   const winnerId = m.selection?.winner;
   const pngs = await Promise.all(candidates.map((c) => readCandidatePng(runDir, c.id)));
-  const cells = candidates.map((c, i) => candidateCell(c, c.id === winnerId, pngs[i]!)).join("\n");
+  const cells = candidates
+    .map((c, i) => candidateCell(c, c.id === winnerId, m.humanPick === c.id, pngs[i]!, runDir))
+    .join("\n");
   // The selection rule (candidates.ts's pickWinner) is: highest composite, except everything within one
   // sigma of the leader ties and the fewest blockers wins. When the winner IS the top composite this is
   // invisible and needs no explanation; only a genuine tie-break needs a sentence naming why.

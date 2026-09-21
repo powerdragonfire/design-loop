@@ -96,6 +96,13 @@ export interface CandidateRow {
   doc: MeasuredDoc;
   critiques: Critique[];
   open: Issue[];
+  /**
+   * Per-critic evidence hallucination rate for THIS candidate alone (see `validateEvidence`). Empty
+   * when nothing was validated: a candidate that never reached the committee, whether because it
+   * could not be measured or because the committee itself failed, has no critiques to check evidence
+   * against.
+   */
+  hallucinationRate: Partial<Record<CriticName, number>>;
   prompt: string;
   handle: Screen;
   failed?: string;
@@ -110,7 +117,18 @@ export type SelectOptions = GenerateOptions & {
   llm: LlmClient;
   sigma: number;
   onDegraded(critic: CriticName, error: string, id: string): void;
+  /**
+   * Called once per candidate, in generation order, as soon as that candidate is fully scored (or
+   * marked failed) — before the next candidate starts and, critically, before `pickWinner` runs.
+   * `pickWinner` throws when every candidate fails, and every candidate has already been generated
+   * and paid for by then; a caller that persists from here (as run.ts does) keeps every candidate on
+   * disk even when that throw stops `selectCandidate` from ever returning.
+   */
+  onCandidate?(row: CandidateRow): Promise<void> | void;
 };
+
+/** The numeric suffix of a `c<N>` candidate id, so "c10" sorts after "c2" rather than before it. */
+const candidateNumber = (id: string): number => Number(id.slice(1));
 
 /**
  * Composite is a weighted mean of critic opinion; the gate is a count of blockers. Selecting on
@@ -131,7 +149,7 @@ export function pickWinner(rows: CandidateRow[], sigma: number): CandidateRow {
   }
   const leader = Math.max(...scored.map((r) => r.composite));
   const tied = scored.filter((r) => r.composite >= leader - sigma);
-  return tied.sort((a, b) => a.blockers - b.blockers || b.composite - a.composite || a.id.localeCompare(b.id))[0]!;
+  return tied.sort((a, b) => a.blockers - b.blockers || b.composite - a.composite || candidateNumber(a.id) - candidateNumber(b.id))[0]!;
 }
 
 /**
@@ -142,9 +160,28 @@ export function pickWinner(rows: CandidateRow[], sigma: number): CandidateRow {
 export async function selectCandidate(opts: SelectOptions): Promise<Selection> {
   const candidates = await generateCandidates(opts);
   const rows: CandidateRow[] = [];
+  const record = async (row: CandidateRow): Promise<void> => {
+    rows.push(row);
+    await opts.onCandidate?.(row);
+  };
   for (const c of candidates) {
     const [html, png] = [await c.handle.getHtml(), await c.handle.getImage()];
-    const doc = await measure(html);
+    const base = { id: c.id, family: c.family, prompt: c.prompt, handle: c.handle, png, html };
+    // A candidate measure() cannot parse is exactly as unusable as one whose committee fails, and no
+    // more fatal: the stage already paid for it, so it is marked failed and the rest still run,
+    // rather than one malformed screen losing every candidate's spend.
+    let doc: MeasuredDoc;
+    try {
+      doc = await measure(html);
+    } catch (err) {
+      await record({
+        ...base,
+        doc: { viewport: { w: 0, h: 0 }, nodes: [] },
+        composite: 0, blockers: 0, gatePass: false, critiques: [], open: [], hallucinationRate: {},
+        failed: `could not be measured: ${errorText(err)}`,
+      });
+      continue;
+    }
     const det = deterministicCritique(doc, opts.contract.tokens);
     const committee = await runCommittee(
       {
@@ -159,18 +196,22 @@ export async function selectCandidate(opts: SelectOptions): Promise<Selection> {
       opts.llm,
     );
     for (const f of committee.failures) opts.onDegraded(f.critic, f.error, c.id);
-    const base = { id: c.id, family: c.family, prompt: c.prompt, handle: c.handle, png, html, doc };
     if (committee.critiques.length === 0) {
-      rows.push({ ...base, composite: 0, blockers: 0, gatePass: false, critiques: [], open: [], failed: `committee unavailable: ${committee.failures.map((f) => `${f.critic}: ${f.error}`).join("; ")}` });
+      await record({
+        ...base, doc, composite: 0, blockers: 0, gatePass: false, critiques: [], open: [], hallucinationRate: {},
+        failed: `committee unavailable: ${committee.failures.map((f) => `${f.critic}: ${f.error}`).join("; ")}`,
+      });
       continue;
     }
     const validated = validateEvidence(committee.critiques, doc);
     const critiques = [...validated.critiques, det.critique];
     const open = openIssues(critiques);
-    rows.push({
+    await record({
       ...base,
+      doc,
       critiques,
       open,
+      hallucinationRate: validated.hallucinationRate,
       // A critic dropped upstream is simply absent here; the weights of the survivors are
       // renormalised to 1 so a partial committee scores instead of throwing (see run.ts's
       // scoring round, which the same rule protects).

@@ -126,26 +126,37 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
 
   // Every candidate is generated, measured and critiqued once, here; the winner becomes v00 without ever
   // being measured or critiqued again — that is the whole point of running this stage before the loop.
+  // Persistence happens from `onCandidate`, as each row is scored, rather than from a loop over the
+  // returned rows: `pickWinner` throws when every candidate fails, which would otherwise mean every
+  // candidate this stage already paid for is written nowhere (spec fix 3).
   const { winner, rows } = await selectCandidate({
     contract, screen, designDir, generator, cfg, progress, llm, sigma,
     onDegraded: (critic, error, id) => degradations.push({ version: id, critic, error }),
+    onCandidate: async (row) => {
+      await run.writeCandidate({
+        id: row.id, family: row.family, png: row.png, html: row.html, doc: row.doc,
+        critiques: row.critiques, composite: row.composite, gatePass: row.gatePass,
+        prompt: row.prompt, openIssues: row.open,
+      });
+    },
   });
   // selectCandidate never calls takeUsage itself, so everything it spent is still sitting in the client
   // waiting to be claimed; taken here, once, it folds into criticUsage exactly like any other round's.
   addUsage(criticUsage, llm.takeUsage?.());
   progress.banner(`candidates · ${rows.length} generated`, { fraction: 0 });
 
-  for (const row of rows) {
-    await run.writeCandidate({
-      id: row.id, family: row.family, png: row.png, html: row.html, doc: row.doc,
-      critiques: row.critiques, composite: row.composite, gatePass: row.gatePass,
-      prompt: row.prompt, openIssues: row.open,
-    });
-  }
   const candidateSummaries = rows.map(toSummary);
   await run.writeSelection({ winner: winner.id, rows: candidateSummaries });
   await run.promoteCandidate(winner.id);
   log?.(`v00: composite ${winner.composite.toFixed(1)}, ${winner.open.length} open, gate ${winner.gatePass ? "pass" : "fail"} (candidate ${winner.id})`);
+
+  // Only the WINNER's hallucination rate folds in: the manifest's rate describes the design that was
+  // actually iterated, and averaging in candidates the loop never saw would misdescribe it. Before this
+  // a run that stopped at v00 always finalised with an empty hallucinationRate (spec fix 1).
+  for (const [critic, rate] of Object.entries(winner.hallucinationRate) as [CriticName, number][]) {
+    const tally = hallucination.get(critic) ?? { sum: 0, n: 0 };
+    hallucination.set(critic, { sum: tally.sum + rate, n: tally.n + 1 });
+  }
 
   // Seed the loop's state from the winner instead of re-scoring it: nothing below may measure or
   // critique v00 a second time.

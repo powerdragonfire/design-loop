@@ -43,13 +43,13 @@ const candidateInput = (r: CandRow) => ({
 });
 const summary = (r: CandRow) => ({ id: r.id, family: r.family, composite: r.composite, blockers: r.blockers ?? 0, gatePass: r.gatePass ?? true });
 /** Writes every candidate, records the selection, promotes the winner to v00, and finalises — the shape `run.ts` leaves behind. */
-const seedWithCandidates = async (rows: CandRow[], winner: string) => {
+const seedWithCandidates = async (rows: CandRow[], winner: string, finOver: Record<string, unknown> = {}) => {
   const run = await openRun(dir, "home", "2026-09-18");
   for (const r of rows) await run.writeCandidate(candidateInput(r));
   const summaries = rows.map(summary);
   await run.writeSelection({ winner, rows: summaries });
   await run.promoteCandidate(winner);
-  await run.finalise(fin({ committeeRank: ["v00"], candidates: summaries, selection: { winner, rows: summaries } }));
+  await run.finalise(fin({ committeeRank: ["v00"], candidates: summaries, selection: { winner, rows: summaries }, ...finOver }));
   return run;
 };
 
@@ -210,6 +210,30 @@ describe("candidate gallery", () => {
   it("omits the gallery entirely for a run that had no candidate stage", async () => {
     const h = await page(await seed());
     expect(h).not.toContain('data-gallery="candidates"');
+  });
+
+  it("prints the approve command for every candidate cell, and marks the one approved by a human", async () => {
+    const rows: CandRow[] = [{ id: "c0", family: 0, composite: 70 }, { id: "c1", family: 0, composite: 90 }];
+    const run = await seedWithCandidates(rows, "c1");
+    await captureApproval(run.dir, "c0");
+    const h = await page(run);
+    const cell = (id: string) => h.split(`data-candidate="${id}"`)[1]?.split('<div class="candidate')[0] ?? "";
+    expect(cell("c0")).toContain(`design-loop approve ${run.dir} c0`);
+    expect(cell("c1")).toContain(`design-loop approve ${run.dir} c1`);
+    expect(cell("c0")).toContain("Approved by you");
+    expect(cell("c1")).not.toContain("Approved by you");
+  });
+
+  it("shows a critic dropped from the winning candidate on v00's card, keyed by the candidate id", async () => {
+    // run.ts records a candidate-stage degradation under the candidate id (e.g. "c1"), never "v00" —
+    // v00's card must still surface it (spec fix 6a).
+    const rows: CandRow[] = [{ id: "c0", family: 0, composite: 70 }, { id: "c1", family: 0, composite: 90 }];
+    const run = await seedWithCandidates(rows, "c1", {
+      degradations: [{ version: "c1", critic: "feasibility", error: "HTTP 400 boom" }],
+    });
+    const s = section(await page(run), "v00");
+    expect(s).toMatch(/critic dropped/i);
+    expect(s).toContain("feasibility");
   });
 });
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { mkdir as mkdirAsync, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,6 +8,23 @@ import { noProgress } from "../../src/cli/progress.js";
 import type { Config, CriticName } from "../../src/types.js";
 import type { Generator, Screen } from "../../src/stitch/adapter.js";
 import type { LlmClient } from "../../src/critics/llm.js";
+
+// Lets one test at a time make a specific candidate's HTML fail measure(), while every other candidate
+// still runs through the real `measure()` this file already relies on (see `candidateHtml` below) —
+// proving the try/catch around it without faking Chromium itself.
+const measureControl = vi.hoisted(() => ({ failWhenHtmlContains: null as string | null }));
+vi.mock("../../src/measure/measure.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/measure/measure.js")>();
+  return {
+    ...actual,
+    measure: vi.fn(async (html: string) => {
+      if (measureControl.failWhenHtmlContains && html.includes(measureControl.failWhenHtmlContains)) {
+        throw new Error(`cannot parse: contains ${measureControl.failWhenHtmlContains}`);
+      }
+      return actual.measure(html);
+    }),
+  };
+});
 
 describe("readDirections", () => {
   let dir: string;
@@ -159,6 +176,12 @@ describe("pickWinner", () => {
     expect(pickWinner([row("c1", 84, 2), row("c0", 84, 2)], 4).id).toBe("c0");
   });
 
+  it("breaks a further tie on the candidate's numeric suffix, not lexicographic id order", () => {
+    // Lexicographically "c10" < "c2", which would pick the wrong candidate once a run has more than
+    // ten (unbounded `families`, spec fix 6b).
+    expect(pickWinner([row("c10", 84, 2), row("c2", 84, 2)], 4).id).toBe("c2");
+  });
+
   it("never returns a candidate whose committee failed", () => {
     const dead = { ...row("c0", 99, 0), failed: "committee unavailable" };
     expect(pickWinner([dead, row("c1", 60, 3)], 4).id).toBe("c1");
@@ -227,6 +250,8 @@ function makeOpts(candOver: Partial<Config["candidates"]> = {}, extra: MakeOptsE
 }
 
 describe("selectCandidate", () => {
+  afterEach(() => { measureControl.failWhenHtmlContains = null; });
+
   it("scores every candidate and returns the winner alongside all the rows", async () => {
     const sel = await selectCandidate(makeOpts({ families: 2, variantsPerFamily: 0 }));
     expect(sel.rows).toHaveLength(2);
@@ -255,5 +280,36 @@ describe("selectCandidate", () => {
     expect(degraded).toEqual([{ critic: "feasibility", error: expect.any(String), id: "c1" }]);
     // The unaffected candidate still gets its full committee.
     expect(sel.rows.find((r) => r.id === "c0")!.critiques.length).toBe(5);
+  });
+
+  it("reports each scored candidate's own per-critic hallucination rate", async () => {
+    // No candidate here cites a made-up selector (issues: [] in makeOpts's fake llm), so every entry
+    // reads 0 — the point is that an entry exists at all, per candidate, not folded into a run-wide
+    // number (spec fix 1).
+    const sel = await selectCandidate(makeOpts({ families: 1, variantsPerFamily: 0 }));
+    expect(Object.keys(sel.winner.hallucinationRate).length).toBeGreaterThan(0);
+    expect(sel.winner.hallucinationRate.typography).toBe(0);
+  });
+
+  it("reports no hallucination rate for a candidate whose committee failed entirely", async () => {
+    const sel = await selectCandidate(makeOpts({ families: 2, variantsPerFamily: 0 }, { failFor: "c1" }));
+    expect(sel.rows.find((r) => r.id === "c1")!.hallucinationRate).toEqual({});
+  });
+
+  it("marks a candidate that cannot be measured as failed, without losing the others", async () => {
+    measureControl.failWhenHtmlContains = "Cand 1";
+    const sel = await selectCandidate(makeOpts({ families: 2, variantsPerFamily: 0 }));
+    const c1 = sel.rows.find((r) => r.id === "c1")!;
+    expect(c1.failed).toMatch(/could not be measured/);
+    expect(c1.hallucinationRate).toEqual({});
+    // pickWinner already excludes anything with `failed` set; this just confirms the stage never
+    // touched the committee for the candidate it could not measure.
+    expect(sel.winner.id).toBe("c0");
+  });
+
+  it("throws when every candidate fails to measure, since there is nothing left to score", async () => {
+    measureControl.failWhenHtmlContains = "Cand";
+    await expect(selectCandidate(makeOpts({ families: 2, variantsPerFamily: 0 })))
+      .rejects.toThrow(/no candidate could be scored.*could not be measured/s);
   });
 });

@@ -40,5 +40,3 @@ JSON to the output path, and write nothing else anywhere.
 `design-loop inspect <runDir>/<version> --selector "<css>"` returns the measured node for a selector,
 with every style property the digest dropped. Use it to check a claim before you make it: an issue
 whose selector is absent from the measurements is discarded and counts against your hallucination rate.
-
-<!-- rubric e4a48686cf1ac0ef -->

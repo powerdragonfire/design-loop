@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { LLM_CRITICS } from "../critics/llm.js";
@@ -56,14 +55,6 @@ with every style property the digest dropped. Use it to check a claim before you
 whose selector is absent from the measurements is discarded and counts against your hallucination rate.
 `;
 
-const digest = (s: string): string => createHash("sha256").update(s).digest("hex").slice(0, 16);
-
-/**
- * The marker that lets staleness be checked by string containment, without re-deriving the whole generated
- * body and diffing it: a rubric edit changes the hash even when the surrounding template does not.
- */
-const stamp = (rubric: string): string => `<!-- rubric ${digest(rubric)} -->`;
-
 /** Writes `.claude/agents/design-loop-<critic>.md` and `design-loop-chair.md` from the current rubrics. */
 export async function syncAgents(opts: { outDir: string }): Promise<string[]> {
   await mkdir(opts.outDir, { recursive: true });
@@ -71,7 +62,7 @@ export async function syncAgents(opts: { outDir: string }): Promise<string[]> {
   for (const s of sources()) {
     const rubric = (await readFile(s.rubric, "utf8")).trimEnd();
     const file = join(opts.outDir, `${s.name}.md`);
-    await writeFile(file, `${body(s, rubric)}\n${stamp(rubric)}\n`);
+    await writeFile(file, body(s, rubric));
     written.push(file);
   }
   return written.sort();
@@ -80,13 +71,20 @@ export async function syncAgents(opts: { outDir: string }): Promise<string[]> {
 /**
  * Agent files that are missing, hand-edited, or generated from an older rubric — anything `dl step` must not
  * trust, because the critic it dispatches would be scoring against a standard nobody chose on purpose.
+ *
+ * Compares the whole rendered file byte-for-byte against what `syncAgents` would write right now, rather than
+ * a hash or marker derived from the rubric alone: a marker that ignores the rest of the file is blind to an
+ * edit that leaves the marker's own line untouched — for example a `tools:` line with `WebFetch` added to it,
+ * which is exactly the edit this check exists to catch. There is nothing here to keep in sync with the
+ * template `body()` renders, because it *is* `body()`, run again.
  */
 export async function staleAgents(opts: { outDir: string }): Promise<string[]> {
   const stale: string[] = [];
   for (const s of sources()) {
     const rubric = (await readFile(s.rubric, "utf8")).trimEnd();
+    const expected = body(s, rubric);
     const current = await readFile(join(opts.outDir, `${s.name}.md`), "utf8").catch(() => null);
-    if (current === null || !current.includes(stamp(rubric))) stale.push(s.name);
+    if (current !== expected) stale.push(s.name);
   }
   return stale;
 }

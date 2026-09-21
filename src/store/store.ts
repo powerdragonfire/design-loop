@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import type { Critique, Issue, MeasuredDoc } from "../types.js";
@@ -112,6 +112,17 @@ export interface Run {
   dir: string;
   /** Claims `vNN` before anything about it is known, so an agent critic has somewhere to read from and write to. */
   openVersion(index: number): Promise<VersionHandle>;
+  /**
+   * Adopts a `vNN` this process did not claim: the suspend state of an agent-mode run, where an earlier
+   * process claimed the directory, wrote everything the critics read, and exited waiting for their answers.
+   *
+   * Deliberately NOT a tolerant `openVersion`. That call's claim-or-fail contract is what makes two live
+   * handles for one index impossible, and `openRun`'s `-2`/`-3` collision suffixes rest on the same
+   * non-recursive-mkdir claim; loosening it would quietly turn a colliding run into an overwriting one. A
+   * caller that means to re-enter a directory says so by name, and this refuses anything that is not that
+   * state: a version that does not exist, or one already scored.
+   */
+  reopenVersion(index: number): Promise<VersionHandle>;
   /** Returns the version directory name, e.g. "v00". */
   writeVersion(v: VersionInput): Promise<string>;
   finalise(m: Finalisation): Promise<void>;
@@ -145,6 +156,16 @@ export interface RoundCursor {
 
 const isExists = (err: unknown): boolean => (err as NodeJS.ErrnoException).code === "EEXIST";
 
+/** True/false for a file that is or is not there; any other failure is a real one and is not swallowed. */
+const fileExists = async (file: string): Promise<boolean> =>
+  stat(file).then(
+    () => true,
+    (err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT" || err.code === "ENOTDIR") return false;
+      throw err;
+    },
+  );
+
 /** Refuses a name that could point outside the runs directory. */
 function assertSegment(what: string, value: string): void {
   if (value === "" || value === "." || value === ".." || /[/\\\0]/.test(value)) {
@@ -172,14 +193,19 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
   const manifestFile = join(dir, "manifest.json");
   const written = (version: string): boolean => versions.some((s) => s.version === version);
 
-  // Hoisted rather than referenced as `this.openVersion` from within the returned object literal: relying on
-  // `this` there is fragile if `Run` is ever destructured, and `writeVersion` needs to call it too.
-  const openVersion = async (index: number): Promise<VersionHandle> => {
+  /** The two entry points agree on what may be written at all; only how the directory is obtained differs. */
+  const writable = (index: number): string => {
     if (!Number.isInteger(index) || index < 0 || index > 99) {
       throw new Error(`Invalid version index ${index}: expected an integer from 0 to 99`);
     }
     if (manifest) throw new Error("Cannot write a version: the run is finalised");
-    const version = versionName(index);
+    return versionName(index);
+  };
+
+  // Hoisted rather than referenced as `this.openVersion` from within the returned object literal: relying on
+  // `this` there is fragile if `Run` is ever destructured, and `writeVersion` needs to call it too.
+  const openVersion = async (index: number): Promise<VersionHandle> => {
+    const version = writable(index);
     const base = join(dir, version);
     try {
       await mkdir(base);
@@ -189,7 +215,32 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
     }
     await mkdir(join(base, "critiques"));
     await mkdir(join(base, "inbox"));
+    return handleFor(version, base);
+  };
 
+  /**
+   * Re-enters a directory an earlier process claimed and did not score. It refuses a version that is missing
+   * (nothing was claimed, so `openVersion` is the call) and one that is scored (rewriting it would change a
+   * past score), which leaves exactly the suspend state. The subdirectories are remade tolerantly: a claim
+   * that died between the three `mkdir`s left them behind, and there is nothing to lose by restoring them.
+   */
+  const reopenVersion = async (index: number): Promise<VersionHandle> => {
+    const version = writable(index);
+    const base = join(dir, version);
+    const there = await stat(base).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
+      throw err;
+    });
+    if (!there?.isDirectory()) throw new Error(`no such version ${version} to reopen`);
+    if (await fileExists(join(base, "composite.json"))) {
+      throw new Error(`version ${version} is already scored: it cannot be reopened`);
+    }
+    await mkdir(join(base, "critiques"), { recursive: true });
+    await mkdir(join(base, "inbox"), { recursive: true });
+    return handleFor(version, base);
+  };
+
+  const handleFor = (version: string, base: string): VersionHandle => {
     return {
       version,
       dir: base,
@@ -243,6 +294,8 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
     dir,
 
     openVersion,
+
+    reopenVersion,
 
     async writeVersion(v) {
       const handle = await openVersion(v.index);
@@ -421,10 +474,37 @@ export async function openExistingRun(runDir: string): Promise<Run> {
     }
   }
 
-  // Only an unfinalised run needs these, to write its manifest later. The `-N` collision suffix is
-  // indistinguishable from a screen name ending in `-N`, so this reading is a best effort.
-  const named = /^(\d{4}-\d{2}-\d{2})-(.+?)(?:-\d+)?$/.exec(basename(runDir));
-  const screen = typeof manifest?.screen === "string" ? manifest.screen : (named?.[2] ?? basename(runDir));
-  const date = typeof manifest?.date === "string" ? manifest.date : (named?.[1] ?? "");
+  // Only an unfinalised run needs these, to write its manifest later.
+  const { screen, date } = identify(runDir, manifest);
   return makeRun(runDir, screen, date, versions, manifest);
+}
+
+/**
+ * Which screen, on which date, a run directory is for. The manifest is authoritative when there is one; a run
+ * still in flight has none, so the name it was given is read back instead. The `-N` collision suffix is
+ * indistinguishable from a screen name ending in `-N`, so that reading is a best effort — which is why the
+ * manifest wins, and why this parse lives in one place rather than beside every caller that needs it.
+ */
+function identify(runDir: string, manifest: Record<string, unknown> | null): { screen: string; date: string } {
+  const named = /^(\d{4}-\d{2}-\d{2})-(.+?)(?:-\d+)?$/.exec(basename(runDir));
+  return {
+    screen: typeof manifest?.screen === "string" ? manifest.screen : (named?.[2] ?? basename(runDir)),
+    date: typeof manifest?.date === "string" ? manifest.date : (named?.[1] ?? ""),
+  };
+}
+
+/**
+ * `identify` for a caller that has only the path — `dl step <runDir>`, which must name the screen and date
+ * `runScreen` is resuming without the operator retyping either. Unlike `openExistingRun` this makes no demand
+ * on the directory's contents: a run suspended before its first version was scored still answers.
+ */
+export async function runIdentity(runDir: string): Promise<{ screen: string; date: string }> {
+  let manifest: Record<string, unknown> | null = null;
+  try {
+    manifest = await parseFile<Record<string, unknown>>(join(runDir, "manifest.json"));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw err;
+  }
+  return identify(runDir, manifest);
 }

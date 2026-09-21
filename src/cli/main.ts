@@ -14,9 +14,14 @@ import { abDistiller, calibrate } from "./calibrate.js";
 import { createProgress, noProgress, promptLines, type Progress, type ProgressMode } from "./progress.js";
 import { runScreen } from "./run.js";
 import { isSkipped, smoke } from "./smoke.js";
+import { stepRun } from "./step.js";
+import { runIdentity } from "../store/store.js";
 
 export interface Deps {
   runScreen: typeof runScreen;
+  stepRun: typeof stepRun;
+  /** The screen and date a run directory is for, so a resumed run needs no retyping. */
+  runIdentity: typeof runIdentity;
   buildReport: typeof buildReport;
   captureApproval: typeof captureApproval;
   calibrate: typeof calibrate;
@@ -46,6 +51,7 @@ const USAGE = `Usage: design-loop [--design <dir>] <command>
 Commands:
   smoke                              check every live service once, before spending real money
   run <screen> [--date YYYY-MM-DD]   generate and critique a screen until a stopping rule fires
+  step <runDir>                      advance an agent-mode run by one round
   review <runDir>                    open the report, then ask which version to approve
   report <runDir>                    build the report page and open it
   approve <runDir> <version>         record your pick for a run
@@ -68,6 +74,8 @@ const FAILED_AUTH = new Set([401, 403]);
 export function defaultDeps(designDir: string, io: Io, progress: Progress = noProgress, mode: ProgressMode = "normal"): Deps {
   return {
     runScreen,
+    stepRun,
+    runIdentity,
     buildReport,
     captureApproval,
     calibrate,
@@ -147,7 +155,60 @@ async function approve(d: Deps, io: Io, runDir: string, version: string, known?:
   io.out(`Approved ${version}: ${version === pick ? "agrees with" : `differs from (${pick})`} the committee's pick.`);
 }
 
+/**
+ * Whether this design folder's critics are Claude Code subagents rather than API calls.
+ *
+ * Read leniently on purpose. A folder that cannot be read at all is not a mode decision, and refusing here
+ * would report a missing or invalid `config.json` in the wrong words and from the wrong place. The API path
+ * that a failure falls through to opens the very same contract a line later, inside `runScreen`, and fails
+ * with the real message — so nothing is swallowed, only deferred to the code that words it properly.
+ */
+async function isAgentMode(designDir: string): Promise<boolean> {
+  try {
+    const { config } = await loadContract(designDir, {}, undefined, { allowNullSigma: true });
+    return config.criticMode === "agent";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One suspension of an agent-mode run: `runDir` absent claims a new run, present resumes that one. Exit 10
+ * means a work order is waiting — not a failure, and deliberately not 0, so a script driving the loop can
+ * tell "dispatch these agents and call me again" apart from "the run is finished".
+ */
+async function stepCommand(
+  d: Deps, io: Io, progress: Progress, designDir: string, runDir?: string, screen?: string, date?: string,
+): Promise<number> {
+  // A resumed run says which screen and date it is for; only the first step is told.
+  const identity = runDir === undefined ? { screen: screen!, date: date! } : await d.runIdentity(runDir);
+  const out = await d.stepRun({
+    designDir, ...identity, runDir, generator: d.makeGenerator(), log: (line) => io.out(line), progress,
+  });
+  if (!out.done) {
+    io.out(`Run: ${out.runDir}`);
+    io.out(`Work order: ${out.workOrder}`);
+    io.out(`Dispatch the agents it names, then: design-loop step ${out.runDir}`);
+    return 10;
+  }
+  // The summary first, then the report, for the reason runCommand gives: a failing report must not cost the
+  // operator the outcome of a run that has already been paid for.
+  io.out(`Stop reason: ${out.result.stopReason}${out.result.abortReason ? ` (${out.result.abortReason})` : ""}`);
+  io.out(`Versions: ${out.result.versions}, best: ${out.result.best}`);
+  try {
+    io.out(`Report: ${await d.buildReport(out.runDir)}`);
+  } catch (err) {
+    io.err(`Report failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  io.out(`Review with: design-loop review ${out.runDir}`);
+  return out.result.stopReason === "aborted" ? 3 : 0;
+}
+
 async function runCommand(d: Deps, io: Io, progress: Progress, designDir: string, screen: string, date: string): Promise<number> {
+  // In agent mode `run` IS the first step: the critics are subagents this process cannot call, so the round
+  // suspends as soon as they are needed. The preflight is skipped with it — it authenticates an Anthropic key
+  // that an agent-mode run never uses, and failing on a key nobody needs would block the whole mode.
+  if (await isAgentMode(designDir)) return await stepCommand(d, io, progress, designDir, undefined, screen, date);
   await progress.phase("check credentials", () => d.preflight());
   const generator = d.makeGenerator();
   const result = await d.runScreen({
@@ -252,6 +313,10 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
         const date = values.date ?? d.now().toISOString().slice(0, 10);
         if (!DATE.test(date)) throw new UsageError(`--date must be YYYY-MM-DD (got ${date})`);
         return await runCommand(d, io, progress, designDir, args[0]!, date);
+      }
+      case "step": {
+        need(1, "one argument: <runDir>");
+        return await stepCommand(d, io, progress, designDir, args[0]!);
       }
       case "smoke":
         need(0, "no arguments");

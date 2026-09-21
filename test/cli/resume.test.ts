@@ -270,6 +270,29 @@ describe("resumingRun", () => {
     ]);
   });
 
+  // The suspend state itself: v00 claimed and written, nothing scored. Before `reopenVersion` this threw
+  // "version v00 already exists" and no agent-mode run could ever be resumed.
+  it("adopts a claimed-but-unscored version instead of refusing it as an existing directory", async () => {
+    const designDir = mkdtempSync(join(tmpdir(), "dl-suspend-"));
+    const first = await openRun(designDir, "home", "2026-09-20");
+    const claimed = await first.openVersion(0);
+    await claimed.writeGenerated({ png: Buffer.from("png"), html: html(0), doc: doc(1), prompt: "p" });
+    await claimed.writeCommitteeInputs({ digest: "d", carriedIssues: [], measurements: [] });
+
+    const resumed = resumingRun(await openExistingRun(first.dir), first.dir);
+    const handle = await resumed.openVersion(0);
+    expect(handle.version).toBe("v00");
+    // A real handle, not the no-op one: its `finish` actually scores the round and registers it, so the
+    // resumed run can finalise with v00 in its committeeRank.
+    await handle.finish({ critiques: [critique()], composite: 70, gatePass: false, openIssues: [] });
+    expect(JSON.parse(readFileSync(join(first.dir, "v00", "composite.json"), "utf8")).composite).toBe(70);
+    await resumed.finalise({
+      stopReason: "pass", committeeRank: ["v00"], hallucinationRate: {}, degradations: [], sigma: 3,
+      spend: { stitchGenerations: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0 },
+    });
+    expect(JSON.parse(readFileSync(join(first.dir, "manifest.json"), "utf8")).best).toBe("v00");
+  });
+
   it("claims a real directory for a round that is not on disk yet", async () => {
     const { run, resumed } = await scoredRun();
     const handle = await resumed.openVersion(1);

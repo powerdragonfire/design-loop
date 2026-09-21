@@ -120,7 +120,7 @@ describe("reopenVersion", () => {
     await (await run.reopenVersion(0)).finish(scored);
     await run.finalise({
       stopReason: "pass", committeeRank: ["v00"], hallucinationRate: {}, degradations: [], sigma: 3,
-      spend: { stitchGenerations: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0 },
+      spend: { stitchGenerations: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0, criticMode: "api" },
     });
     await expect(run.reopenVersion(1)).rejects.toThrow(/the run is finalised/);
   });
@@ -135,7 +135,7 @@ describe("runIdentity", () => {
     });
     await run.finalise({
       stopReason: "pass", committeeRank: ["v00"], hallucinationRate: {}, degradations: [], sigma: 3,
-      spend: { stitchGenerations: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0 },
+      spend: { stitchGenerations: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0, criticMode: "api" },
     });
     expect(await runIdentity(run.dir)).toEqual({ screen: "home", date: "2026-09-20" });
   });

@@ -243,6 +243,19 @@ describe("StitchGenerator", () => {
     expect(seen).toEqual([]);
   });
 
+  // The refusal from screenFromId (sdk.ts) throws the same way every time; retrying it before it surfaces
+  // would add ~5s of pointless backoff and misleading "retrying" progress, exactly the failure mode
+  // retryableCall already guards against for StitchProjectionError.
+  it("does not retry a rebuilt-from-id refusal, and never stalls before surfacing it", async () => {
+    const seen: unknown[] = [];
+    const { gen, sleeps } = make({ generate: vi.fn() }, { projectId: "proj-1", onRetry: (r: unknown) => seen.push(r) });
+    const screen = gen.fromId("sc-1");
+    await expect(screen.getHtml()).rejects.toThrow(/rebuilt from an id/);
+    await expect(screen.getImage()).rejects.toThrow(/rebuilt from an id/);
+    expect(sleeps).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+
   describe("onPrompt", () => {
     it("reports what is about to be sent, for a generate and for an edit", async () => {
       const seen: unknown[] = [];

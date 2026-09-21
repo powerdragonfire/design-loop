@@ -1,5 +1,14 @@
 import { reserve } from "./quota.js";
-import { createSdkProject, screenFromId, StitchProjectionError, type DeviceType, type ModelId, type SdkProject, type SdkScreen } from "./sdk.js";
+import {
+  createSdkProject,
+  screenFromId,
+  ScreenRebuiltFromIdError,
+  StitchProjectionError,
+  type DeviceType,
+  type ModelId,
+  type SdkProject,
+  type SdkScreen,
+} from "./sdk.js";
 
 export type { DeviceType, ModelId, SdkProject, SdkScreen };
 
@@ -67,6 +76,13 @@ const retryableCall = (err: unknown): boolean => !(err instanceof StitchProjecti
 
 const retryableDownload = (err: unknown): boolean =>
   !(err instanceof DownloadError && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429);
+
+/**
+ * A rebuilt-from-id handle's `getHtml`/`getImage` throw `ScreenRebuiltFromIdError` on every call, the same
+ * way every time — retrying it is as pointless as retrying a `StitchProjectionError`, and worse, it stalls
+ * the caller through the full backoff before the (unchanged) error finally surfaces.
+ */
+const retryableLink = (err: unknown): boolean => !(err instanceof ScreenRebuiltFromIdError);
 
 /** The body of a refused download is never read, so it is discarded explicitly rather than left open. */
 async function drain(res: FetchResponse): Promise<void> {
@@ -167,7 +183,7 @@ export class StitchGenerator implements Generator {
     getUrl: () => Promise<string>,
     read: (res: FetchResponse) => Promise<T>,
   ): Promise<T> {
-    const url = await this.retry(`${what} link`, getUrl);
+    const url = await this.retry(`${what} link`, getUrl, retryableLink);
     if (!url) throw new Error(`Stitch returned an empty ${what} URL for screen ${inner.id}`);
     return this.retry(`${what} download`, async () => {
       try {

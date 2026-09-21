@@ -141,6 +141,18 @@ export function createSdkProject(projectId: string, callTool: CallTool = default
 }
 
 /**
+ * Thrown by a `screenFromId` handle's `getHtml`/`getImage` — its own type, like `StitchProjectionError`,
+ * so a caller that retries by type (the adapter's `download()`) can recognize it as permanent rather than
+ * retry a call that is guaranteed to throw the same way every time.
+ */
+export class ScreenRebuiltFromIdError extends Error {
+  constructor(readonly id: string) {
+    super(`screen ${id} was rebuilt from an id: read its HTML and image from the run directory instead`);
+    this.name = "ScreenRebuiltFromIdError";
+  }
+}
+
+/**
  * A handle for a screen that was generated in an earlier process, rebuilt from its id alone so a resumed
  * run can edit it without spending quota to make it again.
  *
@@ -150,7 +162,7 @@ export function createSdkProject(projectId: string, callTool: CallTool = default
 export function screenFromId(projectId: string, id: string, callTool: CallTool = defaultCallTool): SdkScreen {
   if (!id) throw new Error("screenFromId needs a screen id");
   const refuse = async (): Promise<never> => {
-    throw new Error(`screen ${id} was rebuilt from an id: read its HTML and image from the run directory instead`);
+    throw new ScreenRebuiltFromIdError(id);
   };
   return { ...makeScreen(projectId, callTool, { id }), getHtml: refuse, getImage: refuse };
 }

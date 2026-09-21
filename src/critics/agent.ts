@@ -1,12 +1,18 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { versionName, type RoundCursor } from "../store/store.js";
-import { parseCritique } from "./schema.js";
+import { nextIssueId, parseCritique } from "./schema.js";
 import type { CriticInput, LlmClient } from "./llm.js";
 import type { CriticName, Critique } from "../types.js";
 
 export interface PendingUnit {
   critic: CriticName;
+  /**
+   * Where this critic's NEW issues start, computed from the same carried issues and by the same function
+   * `AnthropicLlmClient` uses. Without it an agent restarts at 001, reuses a carried id, and `openIssues()`
+   * overwrites the carried issue with the new one: closed without ever being verified.
+   */
+  nextIssueId: string;
 }
 
 /** Not a failure: the round cannot continue until a subagent writes the named files. */
@@ -15,6 +21,8 @@ export class WorkOrderPending extends Error {
     readonly kind: "critics" | "chair",
     readonly version: string,
     readonly units: PendingUnit[],
+    /** The chair only: the screenshot its input describes, relative to the run directory (src/chair/agent.ts). */
+    readonly screenshot?: string,
   ) {
     super(`${kind} pending for ${version}: ${units.map((u) => u.critic).join(", ")}`);
     this.name = "WorkOrderPending";
@@ -104,7 +112,7 @@ export class AgentLlmClient implements LlmClient {
     return versionName(this.cursor.index);
   }
 
-  async critique(critic: CriticName, _input: CriticInput, _model: string): Promise<Critique> {
+  async critique(critic: CriticName, input: CriticInput, _model: string): Promise<Critique> {
     const dir = join(this.runDir, this.version);
     // In order, first hit wins — see the class comment for why the raw archive leads.
     const sources = [
@@ -118,7 +126,7 @@ export class AgentLlmClient implements LlmClient {
       if (raw !== NOT_FOUND) break;
     }
     if (raw === NOT_FOUND) {
-      this.pending.push({ critic });
+      this.pending.push({ critic, nextIssueId: nextIssueId(critic, input.openIssues) });
       throw new Pending(critic);
     }
     // A file that exists but is malformed is NOT pending: parseCritique throws its own error, and

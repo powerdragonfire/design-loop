@@ -56,9 +56,23 @@ const readJson = async (file: string): Promise<unknown> => {
 };
 
 /**
- * Reads a critique a Claude Code subagent wrote to disk instead of calling the Anthropic API. The
- * archived `critiques/` copy wins over `inbox/`, so replaying an already-scored round can never pick
- * up a newer answer sitting in the inbox and silently change a past score.
+ * Reads a critique a Claude Code subagent wrote to disk instead of calling the Anthropic API. An
+ * archived copy wins over `inbox/`, so replaying an already-scored round can never pick up a newer
+ * answer sitting in the inbox and silently change a past score.
+ *
+ * Three sources, in order: `critiques-raw/`, then `critiques/`, then `inbox/`.
+ *
+ * `critiques-raw/` leads because replay must reproduce the COMPUTATION, not its result — the same rule
+ * `writeChair` follows by archiving the chair's answer before `chair()`'s cap is applied. `critiques/`
+ * holds the critique after `validateEvidence` has dropped every issue whose selector was absent from the
+ * measured document; feed that back to a replayed round and `validateEvidence` finds nothing left to drop
+ * and records a hallucination rate of 0. Only the round read from its inbox in the finalising step would
+ * keep its true rate, so `manifest.json`'s `hallucinationRate` — the instrumented success criterion for
+ * agent mode — would fall by roughly the fraction of rounds replayed, silently, and by an amount that
+ * depends on nothing but how many times the process restarted.
+ *
+ * `critiques/` stays in the chain below it: it is what a version written by the one-shot `writeVersion`
+ * path has, and there the critiques never went through `validateEvidence`, so they are already raw.
  *
  * `cursor` is read-only here: the resuming generator (src/cli/resume.ts) is the sole writer, once per
  * round. This client only ever reads `cursor.index` to find today's version directory.
@@ -92,8 +106,17 @@ export class AgentLlmClient implements LlmClient {
 
   async critique(critic: CriticName, _input: CriticInput, _model: string): Promise<Critique> {
     const dir = join(this.runDir, this.version);
-    const archived = await readJson(join(dir, "critiques", `${critic}.json`));
-    const raw = archived !== NOT_FOUND ? archived : await readJson(join(dir, "inbox", `${critic}.json`));
+    // In order, first hit wins — see the class comment for why the raw archive leads.
+    const sources = [
+      join(dir, "critiques-raw", `${critic}.json`),
+      join(dir, "critiques", `${critic}.json`),
+      join(dir, "inbox", `${critic}.json`),
+    ];
+    let raw: unknown = NOT_FOUND;
+    for (const file of sources) {
+      raw = await readJson(file);
+      if (raw !== NOT_FOUND) break;
+    }
     if (raw === NOT_FOUND) {
       this.pending.push({ critic });
       throw new Pending(critic);

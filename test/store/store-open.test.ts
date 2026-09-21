@@ -42,6 +42,46 @@ describe("openVersion", () => {
     expect(JSON.parse(readFileSync(join(v.dir, "composite.json"), "utf8"))).toEqual({ composite: 70, gatePass: false });
     expect(existsSync(join(v.dir, "critiques", "typography.json"))).toBe(true);
   });
+
+  // The two copies are not the same critique, and that is the whole point: `critiques/` is what the report
+  // and the chair agent read, `critiques-raw/` is what the agent critic client replays. Feeding a replay the
+  // validated copy makes `validateEvidence` find nothing to drop and record a hallucination rate of 0.
+  it("finish keeps the pre-validation critique beside the validated one", async () => {
+    const run = await newRun();
+    const v = await run.openVersion(0);
+    const phantom = issue("typography-999");
+    await v.writeGenerated({ png: Buffer.from("p"), html: "<html></html>", doc, prompt: "make it", screenId: "sc-1", parent: null });
+    await v.finish({
+      critiques: [critique()],
+      rawCritiques: [{ ...critique(), issues: [phantom] }],
+      composite: 70, gatePass: false, openIssues: [],
+    });
+
+    expect(JSON.parse(readFileSync(join(v.dir, "critiques", "typography.json"), "utf8")).issues).toEqual([]);
+    expect(JSON.parse(readFileSync(join(v.dir, "critiques-raw", "typography.json"), "utf8")).issues)
+      .toEqual([phantom]);
+  });
+
+  // No raw copy means no directory: an empty `critiques-raw/` would imply a record that was never kept, and
+  // the one-shot `writeVersion` path is handed critiques that never went through `validateEvidence` anyway.
+  it("makes no raw directory for a caller that has no separate raw form", async () => {
+    const run = await newRun();
+    const v = await run.openVersion(0);
+    await v.writeGenerated({ png: Buffer.from("p"), html: "<html></html>", doc, prompt: "make it", parent: null });
+    await v.finish({ critiques: [critique()], composite: 70, gatePass: false, openIssues: [] });
+    expect(existsSync(join(v.dir, "critiques-raw"))).toBe(false);
+  });
+
+  it("refuses a duplicate raw critique, as it does a duplicate scored one", async () => {
+    const run = await newRun();
+    const v = await run.openVersion(0);
+    await v.writeGenerated({ png: Buffer.from("p"), html: "<html></html>", doc, prompt: "make it", parent: null });
+    await expect(v.finish({
+      critiques: [critique()],
+      rawCritiques: [critique(), { ...critique(), score: 10 }],
+      composite: 70, gatePass: false, openIssues: [],
+    })).rejects.toThrow(/duplicate critique for typography/);
+  });
 });
 
 describe("writeVersion still works as before", () => {

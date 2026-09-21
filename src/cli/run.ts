@@ -212,7 +212,10 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       const open = openIssues(scored, carried);
       const verdict = gate(scored, det.measurementsPass, carried);
 
-      await slot.finish({ critiques: scored, composite: score, gatePass: verdict.pass, openIssues: open, changes });
+      // `rawCritiques` is the committee's answers before `validateEvidence` touched them. A replayed round is
+      // served those, so it re-drops the same issues and recounts the same hallucination rate; served the
+      // validated copy it would find nothing to drop and report 0. See `ScoredInput.rawCritiques`.
+      await slot.finish({ critiques: scored, rawCritiques: committee.critiques, composite: score, gatePass: verdict.pass, openIssues: open, changes });
       const written = slot.version;
       rounds.push({ version: written, composite: score, gatePass: verdict.pass });
       records.set(written, { png, doc, critiques: scored, open, composite: score, prompt, handle });

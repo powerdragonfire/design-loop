@@ -93,6 +93,37 @@ describe("AgentLlmClient", () => {
     expect(out.critiques).toHaveLength(3);
   });
 
+  /**
+   * Three copies of one critic's answer, each with a different score, so whichever the client reads is
+   * unambiguous. The raw archive must lead: `critiques/` holds the critique AFTER `validateEvidence` stripped
+   * the issues whose selectors were absent from the document, so a round replayed from it re-validates an
+   * answer with nothing left to drop and records a hallucination rate of 0 — the manifest's own measure of
+   * whether the critics are inventing evidence, quietly scaled down by how often the run was resumed.
+   */
+  const threeCopies = (scores: Partial<Record<"critiques-raw" | "critiques" | "inbox", number>>) => {
+    const runDir = mkdtempSync(join(tmpdir(), "dl-agent-raw-"));
+    const base = join(runDir, versionName(0));
+    for (const [where, score] of Object.entries(scores)) {
+      mkdirSync(join(base, where), { recursive: true });
+      writeFileSync(join(base, where, "typography.json"), JSON.stringify(critique("typography", score)));
+    }
+    return runDir;
+  };
+
+  it("prefers the raw archive over the validated archive and over the inbox", async () => {
+    const runDir = threeCopies({ "critiques-raw": 11, critiques: 22, inbox: 33 });
+    const client = new AgentLlmClient({ runDir, cursor: { index: 0 } });
+    expect((await client.critique("typography", input, "agent")).score).toBe(11);
+  });
+
+  // A version written by the one-shot `writeVersion` path keeps no raw copy, and the critiques it was handed
+  // never went through `validateEvidence` — so they already ARE the raw answers, and must still beat the inbox.
+  it("falls back to the validated archive when no raw copy was kept", async () => {
+    const runDir = threeCopies({ critiques: 22, inbox: 33 });
+    const client = new AgentLlmClient({ runDir, cursor: { index: 0 } });
+    expect((await client.critique("typography", input, "agent")).score).toBe(22);
+  });
+
   it("does not retry a pending critic", async () => {
     const runDir = setup({});
     const client = new AgentLlmClient({ runDir, cursor: { index: 0 } });

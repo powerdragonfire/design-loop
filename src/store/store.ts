@@ -76,7 +76,22 @@ export interface CommitteeInputs {
 }
 
 export interface ScoredInput {
+  /** The scored critiques: validated, resolutions promoted, deterministic critique included. */
   critiques: Critique[];
+  /**
+   * The committee's answers exactly as they arrived, BEFORE `validateEvidence` dropped the issues whose
+   * selectors are absent from the measured document. Written to `critiques-raw/`, and it is what a replayed
+   * round is served — the same reason `writeChair` archives the chair's answer before `chair()`'s cap is
+   * applied: **replay must reproduce the computation, not its result.** `validateEvidence` re-drops the same
+   * issues and recounts the same hallucination rate; handed the validated copy it would find nothing to drop
+   * and record 0, and `manifest.json`'s `hallucinationRate` would fall by a factor of the number of rounds
+   * replayed. That number is the instrumented success criterion for agent mode, so it has to survive a resume.
+   *
+   * Optional because the one-shot `writeVersion` path has no separate raw form — the critiques it is handed
+   * have not been through `validateEvidence`, so they already ARE the raw answers. A caller that validates
+   * before writing, as the loop does, must pass both.
+   */
+  rawCritiques?: Critique[];
   composite: number;
   gatePass: boolean;
   openIssues: Issue[];
@@ -269,13 +284,27 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
       },
 
       async finish(f) {
-        const critics = f.critiques.map((c) => c.critic);
-        const dup = critics.find((c, n) => critics.indexOf(c) !== n);
+        const duplicate = (list: Critique[]): string | undefined => {
+          const critics = list.map((c) => c.critic);
+          return critics.find((c, n) => critics.indexOf(c) !== n);
+        };
+        // The raw list is checked too: both are written one file per critic, so a duplicate there would
+        // silently overwrite rather than be caught, and the replay would read whichever landed last.
+        const dup = duplicate(f.critiques) ?? duplicate(f.rawCritiques ?? []);
         if (dup !== undefined) throw new Error(`duplicate critique for ${dup}`);
+        // Made only when there is something to put in it, so a version written by the one-shot path does not
+        // grow an empty directory that implies a raw record it never kept.
+        if (f.rawCritiques?.length) await mkdir(join(base, "critiques-raw"), { recursive: true });
         await Promise.all([
           writeFile(join(base, "composite.json"), json({ composite: f.composite, gatePass: f.gatePass })),
           writeFile(join(base, "open-issues.json"), json(f.openIssues)),
           ...f.critiques.map((c) => writeFile(join(base, "critiques", `${c.critic}.json`), json(c))),
+          // A sibling DIRECTORY, not `critiques/<critic>.raw.json`. Two things already read `critiques/` as a
+          // whole: `report.ts` globs `*.json` there and would render every raw copy as an extra critique, and
+          // a work order hands that directory to the chair agent — which would then see the very issues
+          // `validateEvidence` threw out as invented. Keeping the raw record out of that directory costs
+          // nothing and means neither reader has to learn a filename exception.
+          ...(f.rawCritiques ?? []).map((c) => writeFile(join(base, "critiques-raw", `${c.critic}.json`), json(c))),
           ...(f.changes
             ? [writeFile(join(base, "changes.json"), json({
                 requested: f.changes.requested,

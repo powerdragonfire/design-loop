@@ -66,6 +66,18 @@ describe("AgentLlmClient", () => {
     expect((await client.critique("typography", input, "agent")).score).toBe(11);
   });
 
+  it("treats a critiques file containing literal null as malformed, not as absent", async () => {
+    // A naive "absent" sentinel of `null` would make this file look not-found and fall through to
+    // inbox/, breaking "archived always wins". It must instead reach parseCritique and be dropped.
+    const runDir = setup({ typography: null as unknown }, "critiques");
+    mkdirSync(join(runDir, versionName(0), "inbox"), { recursive: true });
+    writeFileSync(join(runDir, versionName(0), "inbox", "typography.json"),
+      JSON.stringify(critique("typography", 99)));
+    const client = new AgentLlmClient({ runDir, cursor: { index: 0 } });
+
+    await expect(client.critique("typography", input, "agent")).rejects.toThrow(/not an object/);
+  });
+
   it("drops a malformed critique as a failed critic rather than crashing", async () => {
     const runDir = setup({
       typography: { critic: "typography", score: 999, issues: [], resolved: { claimed: [], verified: [] } },

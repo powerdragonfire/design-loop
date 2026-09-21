@@ -33,12 +33,19 @@ class Pending extends Error {
   }
 }
 
-const readJson = async (file: string): Promise<unknown | null> => {
+// Distinguishes "the file does not exist" from "the file exists and its JSON content happens to be
+// `null`". Using `null` itself as the not-found sentinel (as an earlier version of this file did) would
+// make a `critiques/<critic>.json` containing literal `null` fall through to `inbox/` — breaking the
+// "archived always wins" invariant — and would misfile it as *pending* rather than malformed, the same
+// missing-vs-malformed collapse the class-level comment below warns about, reached by a different route.
+const NOT_FOUND = Symbol("not-found");
+
+const readJson = async (file: string): Promise<unknown> => {
   let raw: string;
   try {
     raw = await readFile(file, "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return NOT_FOUND;
     throw err;
   }
   try {
@@ -55,6 +62,17 @@ const readJson = async (file: string): Promise<unknown | null> => {
  *
  * `cursor` is read-only here: the resuming generator (src/cli/resume.ts) is the sole writer, once per
  * round. This client only ever reads `cursor.index` to find today's version directory.
+ *
+ * CALLING CONTRACT — read before using this class anywhere but a test: `throwIfPending()` must be
+ * called immediately after `runCommittee()` returns, before anything reads `CommitteeResult`. A
+ * missing critic and a malformed one both surface to `runCommittee` as a rejected promise, and its
+ * `allSettled` handler (src/critics/llm.ts) files both identically into `dropped`/`failures` — it has
+ * no way to tell "waiting for a subagent" apart from "this subagent's answer doesn't parse". That
+ * distinction exists only inside this class's private `pending` list. Reading `out.dropped` or
+ * `out.critiques` before calling `throwIfPending()` will silently renormalise the weights over
+ * whichever critics happened to have files on disk, and score a round that should have suspended
+ * instead. This cannot be fixed structurally without changing `llm.ts`'s `CommitteeResult` shape,
+ * which is out of this class's scope — so the caller must preserve the ordering by convention.
  */
 export class AgentLlmClient implements LlmClient {
   private readonly runDir: string;
@@ -74,9 +92,9 @@ export class AgentLlmClient implements LlmClient {
 
   async critique(critic: CriticName, _input: CriticInput, _model: string): Promise<Critique> {
     const dir = join(this.runDir, this.version);
-    const raw = (await readJson(join(dir, "critiques", `${critic}.json`)))
-      ?? (await readJson(join(dir, "inbox", `${critic}.json`)));
-    if (raw === null) {
+    const archived = await readJson(join(dir, "critiques", `${critic}.json`));
+    const raw = archived !== NOT_FOUND ? archived : await readJson(join(dir, "inbox", `${critic}.json`));
+    if (raw === NOT_FOUND) {
       this.pending.push({ critic });
       throw new Pending(critic);
     }
@@ -91,6 +109,10 @@ export class AgentLlmClient implements LlmClient {
    * Raises one work order naming every critic still to answer. Must be called only after
    * `runCommittee` has settled all four critics, never from inside `critique()` itself — otherwise the
    * first missing file would throw before its siblings' files were even checked.
+   *
+   * Call this BEFORE reading `CommitteeResult` — see the class-level "CALLING CONTRACT" comment. A
+   * pending critic looks exactly like a dropped one to `runCommittee`, so checking here first is the
+   * only way to tell "the round must suspend" apart from "the round scored with one fewer critic".
    */
   throwIfPending(): void {
     if (this.pending.length === 0) return;

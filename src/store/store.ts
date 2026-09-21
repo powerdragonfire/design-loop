@@ -88,6 +88,14 @@ export interface Finalisation {
    * `null` records that no calibration was found; it is never simply left out.
    */
   calibration?: { sigma: number; criticModel: string; weights: Record<string, number>; measuredAt: string } | null;
+  /**
+   * The candidate stage's own rows and the one it picked, kept at the manifest's top level too (not only
+   * in `candidates/selection.json`) so a reader of manifest.json alone sees the whole stage. Optional
+   * because a caller with no candidate stage of its own — today, only tests exercising `finalise` in
+   * isolation — never has this to give; `finalise` then records an empty stage rather than omitting it.
+   */
+  candidates?: CandidateSummary[];
+  selection?: SelectionInput | null;
 }
 
 export interface Run {
@@ -284,6 +292,8 @@ function makeRun(
         degradations: m.degradations,
         sigma: m.sigma,
         calibration: m.calibration ?? null,
+        candidates: m.candidates ?? [],
+        selection: m.selection ?? null,
       });
       await writeAtomic(manifestFile, json(next));
       manifest = next;

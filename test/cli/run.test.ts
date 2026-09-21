@@ -3,9 +3,9 @@ import { mkdtempSync, cpSync, readFileSync, writeFileSync, existsSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { runScreen } from "../../src/cli/run.js";
+import { runScreen, type RunOptions } from "../../src/cli/run.js";
 import { recordProgress } from "../helpers/recordProgress.js";
-import { FakeGenerator } from "../../src/stitch/adapter.js";
+import { FakeGenerator, type Generator } from "../../src/stitch/adapter.js";
 import { reserve, MONTHLY_LIMIT } from "../../src/stitch/quota.js";
 import type { CriticInput, LlmClient } from "../../src/critics/llm.js";
 import type { ChairClient, ChairInput } from "../../src/chair/chair.js";
@@ -58,6 +58,62 @@ const chairOf = (failFirst = 0, changes: Issue[] = []) => {
 };
 const run = (dir: string, gen: FakeGenerator, llm: LlmClient, chairClient: ChairClient, extra: object = {}) =>
   runScreen({ designDir: dir, screen: "home", date: DATE, generator: gen, llm, chairClient, ...extra });
+
+const currentMonth = () => new Date().toISOString().slice(0, 7);
+/** Pre-spends the quota down to `remaining` generations left this month, without the async round trip
+ * through `reserve()` — `opts()` below has to stay synchronous so it can be passed straight to `runScreen`. */
+const setQuota = (dir: string, remaining: number) => {
+  mkdirSync(join(dir, ".design-loop"), { recursive: true });
+  writeFileSync(join(dir, ".design-loop", "quota.json"), JSON.stringify({ month: currentMonth(), used: MONTHLY_LIMIT - remaining }));
+};
+
+/**
+ * Builds `RunOptions` for a fresh design folder: `cfgOver` is merged into config.json, and generator/llm/
+ * chairClient default to a script that gates clean on the very first screen, so a test only has to
+ * override what it is actually exercising. `extra.quotaRemaining` pre-spends the quota.
+ */
+const opts = (cfgOver: Record<string, unknown> = {}, extra: { quotaRemaining?: number } & Partial<RunOptions> = {}): RunOptions => {
+  const dir = setup();
+  if (Object.keys(cfgOver).length > 0) {
+    const cfg = readJson(join(dir, "config.json"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ ...cfg, ...cfgOver }));
+  }
+  const { quotaRemaining, ...rest } = extra;
+  if (quotaRemaining !== undefined) setQuota(dir, quotaRemaining);
+  return {
+    designDir: dir, screen: "home", date: DATE,
+    generator: new FakeGenerator(Array(30).fill(shot(48))),
+    llm: llmOf([90]).llm,
+    chairClient: chairOf().client,
+    ...rest,
+  };
+};
+
+/** Wraps `o.llm` to count every critique() call, across the candidate stage and the edit loop alike. */
+const runWithCountingLlm = async (o: RunOptions) => {
+  let critiqueCalls = 0;
+  const inner = o.llm;
+  const llm: LlmClient = {
+    critique: (critic, input, model) => { critiqueCalls++; return inner.critique(critic, input, model); },
+    takeUsage: inner.takeUsage?.bind(inner),
+  };
+  const res = await runScreen({ ...o, llm });
+  return { res, critiqueCalls };
+};
+
+/** Wraps `o.generator` to count generate()/variants() calls directly, proving the backwards-compatibility
+ * guarantee on the calls themselves rather than on some derived count. */
+const runWithCountingGenerator = async (o: RunOptions) => {
+  let generate = 0;
+  let variants = 0;
+  const inner = o.generator;
+  const generator: Generator = {
+    generate: (prompt) => { generate++; return inner.generate(prompt); },
+    variants: (seed, prompt, vo) => { variants++; return inner.variants(seed, prompt, vo); },
+  };
+  const res = await runScreen({ ...o, generator });
+  return { generate, variants, res };
+};
 
 describe("runScreen", () => {
   it("stops at round 0 with zero edits when the gate already passes", async () => {
@@ -131,7 +187,9 @@ describe("runScreen", () => {
     expect(out.stopReason).toBe("pass");
     const d = manifest(dir).degradations;
     expect(d).toHaveLength(1);
-    expect(d[0]).toMatchObject({ version: "v00", critic: "feasibility" });
+    // The only round here is the candidate stage's: the degradation is keyed by the candidate id it
+    // happened on, not by the version id the candidate is later promoted to.
+    expect(d[0]).toMatchObject({ version: "c0", critic: "feasibility" });
     expect(d[0].error).toContain("boom");
   });
 
@@ -224,12 +282,13 @@ describe("runScreen", () => {
     expect(manifest(dir).abortReason).toContain("invalid x-api-key");
   });
 
-  it("rethrows, writing no manifest, when every LLM critic is unavailable at round 0", async () => {
+  it("rethrows, writing no manifest, when every LLM critic is unavailable on the only candidate", async () => {
     const dir = setup(); const gen = new FakeGenerator([shot(48)]);
     const denied = Object.assign(new Error("invalid x-api-key"), { status: 401 });
-    // The deterministic critique alone would pass this screen's gate; no committee ever reviewed it.
+    // The candidate stage runs before anything is written: a wholly unscoreable candidate (and, with
+    // one family and no variants, the only candidate there is) leaves pickWinner nothing to choose.
     await expect(run(dir, gen, llmOf([90], () => denied).llm, chairOf().client))
-      .rejects.toThrow(/committee unavailable.*typography: invalid x-api-key/);
+      .rejects.toThrow(/no candidate could be scored/);
     expect(existsSync(join(runDir(dir), "manifest.json"))).toBe(false);
   });
 
@@ -386,6 +445,36 @@ describe("runScreen", () => {
     expect(manifest(dir).stopReason).toBe("pass");
   });
 
+  describe("the candidate stage", () => {
+    it("reserves quota for the candidates as well as the edits", async () => {
+      await expect(runScreen(opts({ candidates: { families: 2, variantsPerFamily: 2 }, maxRounds: 5 }, { quotaRemaining: 10 })))
+        .rejects.toThrow(/11 generations/);
+    });
+
+    it("starts the loop from the winning candidate, and counts the candidates it generated", async () => {
+      const res = await runScreen(opts({ candidates: { families: 2, variantsPerFamily: 0 } }));
+      const m = JSON.parse(readFileSync(join(res.runDir, "manifest.json"), "utf8"));
+      expect(m.spend.stitchGenerations).toBe(2 + m.versions.length - 1);
+      expect(m.candidates).toHaveLength(2);
+      expect(m.selection.winner).toMatch(/^c\d+$/);
+    });
+
+    // maxRounds must be a positive integer (ConfigSchema), so this proves "the winner is not re-critiqued"
+    // by counting critique calls instead of by round count: a single candidate's committee is 4 calls
+    // (one per LLM critic); a second, wasted round on the very same screen would add 4 more.
+    it("does not measure or critique the winner twice", async () => {
+      const { res, critiqueCalls } = await runWithCountingLlm(opts({ candidates: { families: 1, variantsPerFamily: 0 }, maxRounds: 1 }));
+      expect(critiqueCalls).toBe(4);
+      expect(res.versions).toBe(1);
+    });
+
+    it("generates exactly once when there is no candidates block and no directions.md", async () => {
+      const { generate, variants } = await runWithCountingGenerator(opts({ maxRounds: 1 }));
+      expect(generate).toBe(1);
+      expect(variants).toBe(0);
+    });
+  });
+
   describe("progress", () => {
     const strip = (events: string[]) => events.filter((e) => !e.startsWith("header ") && !e.startsWith("log "));
 
@@ -405,8 +494,11 @@ describe("runScreen", () => {
         .filter((e) => /^(banner|begin|done) /.test(e))
         .map((e) => e.replace(/: .*$/, "").replace(/ @[\d.]+$/, ""));
       const scored = ["begin fetch html + image", "done fetch html + image", "begin measure", "done measure", "begin critics", "done critics"];
+      // v00 is now a candidate, not a loop round: the candidate stage only reports its own generation
+      // (no fetch/measure/critics phases of its own), then the loop starts at v01 and reports as before.
       expect(steps).toEqual([
-        "banner v00 · first generation", "begin stitch generate", "done stitch generate", ...scored,
+        "begin stitch generate 1/1", "done stitch generate 1/1",
+        "banner candidates · 1 generated",
         "begin chair", "done chair",
         "banner v01 · edit 1 of at most 5", "begin stitch edit", "done stitch edit", ...scored,
       ]);
@@ -416,12 +508,14 @@ describe("runScreen", () => {
       const dir = setup(); const { progress, events } = recordProgress();
       await run(dir, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 80]).llm, chairOf().client, { progress });
       const banners = events.filter((e) => e.startsWith("banner "));
-      expect(banners).toEqual(["banner v00 · first generation @0", "banner v01 · edit 1 of at most 5 @0.2"]);
+      expect(banners).toEqual(["banner candidates · 1 generated @0", "banner v01 · edit 1 of at most 5 @0.2"]);
     });
 
     it("says what each step found, so a person can tell it is working", async () => {
       const dir = setup(); const { progress, events } = recordProgress();
-      await run(dir, new FakeGenerator([shot(48)]), llmOf([90]).llm, chairOf().client, { progress });
+      // A single, immediately-passing candidate would run no loop round at all, and so report none of
+      // these phases; the second, gate-passing shot forces a real edit round to see them on.
+      await run(dir, new FakeGenerator([shot(30), shot(48)]), llmOf([70, 90]).llm, chairOf().client, { progress });
       expect(events).toContainEqual(expect.stringMatching(/^done fetch html \+ image: \d+ KB html, \d+ KB png$/));
       expect(events).toContainEqual(expect.stringMatching(/^done measure: \d+ nodes$/));
       expect(events).toContain("done critics: 4/4 ok");
@@ -429,8 +523,10 @@ describe("runScreen", () => {
 
     it("shows each critic as it finishes, and a dropped one with its reason", async () => {
       const dir = setup(); const { progress, events } = recordProgress();
-      const llm = llmOf([80], (critic) => (critic === "feasibility" ? Object.assign(new Error("400 no"), { status: 400 }) : undefined)).llm;
-      await run(dir, new FakeGenerator([shot(48)]), llm, chairOf().client, { progress });
+      // The candidate stage never reports per-critic lines (no committeeHooks of its own); a second,
+      // gate-passing shot forces a real edit round, which does.
+      const llm = llmOf([70, 80], (critic) => (critic === "feasibility" ? Object.assign(new Error("400 no"), { status: 400 }) : undefined)).llm;
+      await run(dir, new FakeGenerator([shot(30), shot(48)]), llm, chairOf().client, { progress });
       expect(events).toContainEqual(expect.stringMatching(/^info {3}✓ typography\s+80/));
       expect(events).toContainEqual(expect.stringMatching(/^info {3}✗ feasibility\s+dropped: 400 no$/));
       expect(events).toContain("done critics: 3/4 ok");

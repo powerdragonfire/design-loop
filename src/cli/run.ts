@@ -8,13 +8,13 @@ import { decide, type RoundRecord, type StopReason } from "../scoring/stop.js";
 import { distill } from "../distill/distill.js";
 import { runCommittee, type LlmClient } from "../critics/llm.js";
 import { chair, type ChairClient } from "../chair/chair.js";
+import { selectCandidate, type CandidateRow } from "./candidates.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
 import { MONTHLY_LIMIT, readQuota } from "../stitch/quota.js";
-import { openRun, type Degradation } from "../store/store.js";
+import { openRun, type CandidateSummary, type Degradation } from "../store/store.js";
 import { readCalibration, type Calibration } from "./calibration.js";
 import { costUsd } from "./pricing.js";
 import { groupTokenIssues } from "./group.js";
-import { buildFirstPrompt } from "./prompt.js";
 import { committeeHooks, noProgress, type Progress } from "./progress.js";
 import type { CriticName, Critique, Issue, MeasuredDoc, Usage } from "../types.js";
 
@@ -61,6 +61,11 @@ const addUsage = (total: Usage, more: Usage | undefined): void => {
 
 const isDeterministic = (i: Issue): boolean => i.id.startsWith("det-");
 
+/** `CandidateRow` names the field `open`; the store's `openIssues`/`VersionInput` shape names it `openIssues`. */
+const toSummary = (r: CandidateRow): CandidateSummary => ({
+  id: r.id, family: r.family, composite: r.composite, blockers: r.blockers, gatePass: r.gatePass, failed: r.failed,
+});
+
 export async function runScreen(opts: RunOptions): Promise<RunResult> {
   const { designDir, screen, date, generator, llm, chairClient, log } = opts;
   const progress = opts.progress ?? noProgress;
@@ -68,15 +73,18 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   // Everything that can fail cheaply fails here: before any spend and before any directory exists.
   const contract = await loadContract(designDir, {}, screen);
   const cfg = contract.config;
+  // One seed per family plus that family's variants, all spent before the edit loop gets a single edit.
+  const totalCandidates = cfg.candidates.families * (1 + cfg.candidates.variantsPerFamily);
   const zero = noUsage();
   costUsd(cfg.models.critic, zero);
   costUsd(cfg.models.chair, zero);
   const quota = await readQuota(opts.quotaDir ?? designDir);
-  if (quota.remaining < cfg.maxRounds + 1) {
+  const needed = totalCandidates + cfg.maxRounds;
+  if (quota.remaining < needed) {
     const [y, m] = quota.month.split("-").map(Number);
     const resets = new Date(Date.UTC(y!, m!, 1)).toISOString().slice(0, 10);
     throw new Error(
-      `Stitch quota too low: ${quota.remaining} generations left, a run may need ${cfg.maxRounds + 1} — resets ${resets}`,
+      `Stitch quota too low: ${quota.remaining} generations left, a run may need ${needed} generations — resets ${resets}`,
     );
   }
   if (quota.warn) log?.(`Stitch quota: ${quota.used}/${MONTHLY_LIMIT} used this month`);
@@ -104,8 +112,6 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   let carried: Issue[] = [];
   let prevOpen: Issue[] = [];
   let prevDoc: MeasuredDoc | null = null;
-  // The version the next edit is built from: null for round 0, then the chair's `buildFrom` or the previous version.
-  let parent: string | null = null;
 
   const askChair = async (input: Parameters<typeof chair>[0]) => {
     try {
@@ -118,22 +124,113 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   };
   const spentSoFar = (): number => costUsd(cfg.models.critic, criticUsage) + costUsd(cfg.models.chair, chairUsage);
 
+  // Every candidate is generated, measured and critiqued once, here; the winner becomes v00 without ever
+  // being measured or critiqued again — that is the whole point of running this stage before the loop.
+  const { winner, rows } = await selectCandidate({
+    contract, screen, designDir, generator, cfg, progress, llm, sigma,
+    onDegraded: (critic, error, id) => degradations.push({ version: id, critic, error }),
+  });
+  // selectCandidate never calls takeUsage itself, so everything it spent is still sitting in the client
+  // waiting to be claimed; taken here, once, it folds into criticUsage exactly like any other round's.
+  addUsage(criticUsage, llm.takeUsage?.());
+  progress.banner(`candidates · ${rows.length} generated`, { fraction: 0 });
+
+  for (const row of rows) {
+    await run.writeCandidate({
+      id: row.id, family: row.family, png: row.png, html: row.html, doc: row.doc,
+      critiques: row.critiques, composite: row.composite, gatePass: row.gatePass,
+      prompt: row.prompt, openIssues: row.open,
+    });
+  }
+  const candidateSummaries = rows.map(toSummary);
+  await run.writeSelection({ winner: winner.id, rows: candidateSummaries });
+  await run.promoteCandidate(winner.id);
+  log?.(`v00: composite ${winner.composite.toFixed(1)}, ${winner.open.length} open, gate ${winner.gatePass ? "pass" : "fail"} (candidate ${winner.id})`);
+
+  // Seed the loop's state from the winner instead of re-scoring it: nothing below may measure or
+  // critique v00 a second time.
+  stitchGenerations = rows.length;
+  prevDoc = winner.doc;
+  carried = winner.open;
+  prevOpen = winner.open;
+  rounds.push({ version: "v00", composite: winner.composite, gatePass: winner.gatePass });
+  records.set("v00", {
+    png: winner.png, doc: winner.doc, critiques: winner.critiques, open: winner.open,
+    composite: winner.composite, prompt: winner.prompt, handle: winner.handle,
+  });
+
   const loop = async (): Promise<{ stop: StopReason; best: string }> => {
-    let prompt = buildFirstPrompt(contract, screen);
-    let baseHandle: Screen | null = null;
+    let prompt = "";
+    let baseHandle: Screen = winner.handle;
     // The chair changes `prompt` was built to make; recorded on the version that prompt produces, so a
-    // regression can be read back against what the round was trying to fix. Round 0 has none.
+    // regression can be read back against what the round was trying to fix. v00 has none: it was not
+    // built from a chair prompt at all.
     let changes: { requested: number; applied: Issue[] } | undefined;
-    for (let n = 0; ; n++) {
+    let parent: string | null = null;
+
+    // Shared by the seeded winner and every edit the loop scores itself: decide whether `written` ends
+    // the run, and if not, ask the chair for the next prompt and the version to build it from.
+    const advance = async (written: string): Promise<{ stop: StopReason; best: string } | null> => {
+      const decision = decide(rounds, cfg);
+      if (decision.stop) return { stop: decision.stop, best: decision.best };
+
+      const last = records.get(written)!;
+      const best = records.get(decision.best)!;
+      // A regression is judged against the noise floor, as convergence is. The chair then works on the BEST
+      // version, so it is given that version's screenshot and open issues, and the prompt that broke it.
+      const regressed = last.composite < best.composite - cfg.convergenceSigmas * sigma;
+      // Only what the CHAIR sees is grouped: one off-token value on twenty elements is one edit, not twenty
+      // rounds of the three-change cap. The store, the gate and the critics keep the per-selector issues.
+      const chairInput = regressed
+        ? {
+            critiques: last.critiques,
+            openIssues: groupTokenIssues(best.open),
+            imagePng: best.png,
+            tokens: contract.tokens,
+            regression: {
+              bestVersion: decision.best,
+              delta: last.composite - best.composite,
+              introduced: last.open.filter((i) => !best.open.some((b) => b.id === i.id)),
+              failedPrompt: last.prompt,
+            },
+          }
+        : { critiques: last.critiques, openIssues: groupTokenIssues(last.open), imagePng: last.png, tokens: contract.tokens, regression: null };
+
+      const chairPhase = (): Promise<Awaited<ReturnType<typeof askChair>>> =>
+        progress.phase("chair", () => askChair(chairInput), (c) => `${c.changes.length} change${c.changes.length === 1 ? "" : "s"} asked of Stitch`);
+      let next;
+      try {
+        next = await chairPhase();
+      } catch {
+        progress.warn("chair failed, retrying once");
+        next = await chairPhase();
+      }
+      if (next.requested > next.changes.length) {
+        log?.(`chair returned ${next.requested} changes; keeping the top ${next.changes.length}`);
+      }
+      prompt = next.prompt;
+      changes = { requested: next.requested, applied: next.changes };
+      // The next version is an edit of `base`, so the next round's state describes `base`, not a regressed `last`.
+      parent = next.buildFrom ?? written;
+      const base = records.get(parent)!;
+      baseHandle = base.handle;
+      // Deterministic issues are re-measured every round, so only the LLM ones are carried.
+      carried = base.open.filter((i) => !isDeterministic(i));
+      prevOpen = base.open;
+      prevDoc = base.doc;
+      return null;
+    };
+
+    const seeded = await advance("v00");
+    if (seeded) return seeded;
+
+    for (let n = 1; ; n++) {
       const version = `v${String(n).padStart(2, "0")}`;
-      progress.banner(n === 0 ? `${version} · first generation` : `${version} · edit ${n} of at most ${cfg.maxRounds}`, {
+      progress.banner(`${version} · edit ${n} of at most ${cfg.maxRounds}`, {
         fraction: n / cfg.maxRounds,
         status: `$${spentSoFar().toFixed(2)} so far · ${stitchGenerations} Stitch generation${stitchGenerations === 1 ? "" : "s"}`,
       });
-      const handle: Screen = await progress.phase(
-        n === 0 ? "stitch generate" : "stitch edit",
-        () => (baseHandle ? baseHandle.edit(prompt) : generator.generate(prompt)),
-      );
+      const handle: Screen = await progress.phase("stitch edit", () => baseHandle.edit(prompt));
       stitchGenerations++;
       const [html, png] = await progress.phase(
         "fetch html + image",
@@ -190,53 +287,8 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       records.set(written, { png, doc, critiques: scored, open, composite: score, prompt, handle });
       log?.(`${written}: composite ${score.toFixed(1)}, ${open.length} open, gate ${verdict.pass ? "pass" : "fail"}`);
 
-      const decision = decide(rounds, cfg);
-      if (decision.stop) return { stop: decision.stop, best: decision.best };
-
-      const last = records.get(written)!;
-      const best = records.get(decision.best)!;
-      // A regression is judged against the noise floor, as convergence is. The chair then works on the BEST
-      // version, so it is given that version's screenshot and open issues, and the prompt that broke it.
-      const regressed = last.composite < best.composite - cfg.convergenceSigmas * sigma;
-      // Only what the CHAIR sees is grouped: one off-token value on twenty elements is one edit, not twenty
-      // rounds of the three-change cap. The store, the gate and the critics keep the per-selector issues.
-      const chairInput = regressed
-        ? {
-            critiques: last.critiques,
-            openIssues: groupTokenIssues(best.open),
-            imagePng: best.png,
-            tokens: contract.tokens,
-            regression: {
-              bestVersion: decision.best,
-              delta: last.composite - best.composite,
-              introduced: last.open.filter((i) => !best.open.some((b) => b.id === i.id)),
-              failedPrompt: last.prompt,
-            },
-          }
-        : { critiques: last.critiques, openIssues: groupTokenIssues(last.open), imagePng: last.png, tokens: contract.tokens, regression: null };
-
-      const chairPhase = (): Promise<Awaited<ReturnType<typeof askChair>>> =>
-        progress.phase("chair", () => askChair(chairInput), (c) => `${c.changes.length} change${c.changes.length === 1 ? "" : "s"} asked of Stitch`);
-      let next;
-      try {
-        next = await chairPhase();
-      } catch {
-        progress.warn("chair failed, retrying once");
-        next = await chairPhase();
-      }
-      if (next.requested > next.changes.length) {
-        log?.(`chair returned ${next.requested} changes; keeping the top ${next.changes.length}`);
-      }
-      prompt = next.prompt;
-      changes = { requested: next.requested, applied: next.changes };
-      // The next version is an edit of `base`, so the next round's state describes `base`, not a regressed `last`.
-      parent = next.buildFrom ?? written;
-      const base = records.get(parent)!;
-      baseHandle = base.handle;
-      // Deterministic issues are re-measured every round, so only the LLM ones are carried.
-      carried = base.open.filter((i) => !isDeterministic(i));
-      prevOpen = base.open;
-      prevDoc = base.doc;
+      const stop = await advance(written);
+      if (stop) return stop;
     }
   };
 
@@ -273,6 +325,8 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     degradations,
     sigma,
     calibration,
+    candidates: candidateSummaries,
+    selection: { winner: winner.id, rows: candidateSummaries },
   });
   return { stopReason, versions: rounds.length, best: stoppedBest ?? committeeRank[0]!, runDir: run.dir, abortReason };
 }

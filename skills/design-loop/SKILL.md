@@ -57,13 +57,19 @@ Stop reasons: `pass` (no open blockers or majors), `converged` (two rounds witho
 `budget` (hit the round cap), `aborted` (exit 3 — saved versions are kept and still reviewable).
 
 **In `criticMode: "agent"` the run stops after each generation and hands you the work instead.** The
-critics and the chair are subagents you dispatch; `dl run` cannot call them itself, so it suspends:
+critics and the chair are subagents you dispatch; `dl run` cannot call them itself, so it suspends.
+
+Before the first agent-mode run, and again after every upgrade of the tool, run `dl sync-agents`. It writes
+the `design-loop-*` agent definitions into `~/.claude/agents/`, where Claude Code finds them from any project;
+`run` and `step` refuse to write a work order while those files are missing or out of date, and say so.
+If the new agent types are not yet available to you, tell the user they may need to restart Claude Code.
 
 1. Run `dl run <screen>` (the first step) or `dl step <runDir>` (every step after it).
 2. Exit 0 — the run is finished; go to step 4 below. Exit 10 — read the `work-order.json` it printed.
-3. For each unit in `units`, dispatch a subagent of the type named in `agent`. Give it the unit's
-   `inputs` paths and its `output` path, and nothing else. Dispatch at most `concurrency` at a time.
-   Wait for all of them, then go back to 1.
+3. For each unit in `units`, dispatch a subagent of the type named in `agent`. Give it the work order's
+   `runDir` and `designDir`, the unit's `inputs` paths, its `output` path and, for a critic, its
+   `nextIssueId`, and nothing else. Dispatch at most `concurrency` at a time. Wait for all of them, then go
+   back to 1.
 
 Paths in a work order are relative to `runDir` (or to `designDir` for `brief.md`, `tokens.json` and
 `screens/`), both of which the file gives as absolute paths. An input with the value `null` is one this

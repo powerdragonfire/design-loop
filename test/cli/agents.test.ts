@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { syncAgents, staleAgents } from "../../src/cli/agents.js";
+import { defaultAgentsDir, syncAgents, staleAgents } from "../../src/cli/agents.js";
+import { main } from "../../src/cli/main.js";
+import { LEGEND } from "../../src/critics/llm.js";
 
 const outDir = () => mkdtempSync(join(tmpdir(), "dl-agents-"));
 
@@ -29,7 +31,7 @@ describe("syncAgents", () => {
     const dir = outDir();
     await syncAgents({ outDir: dir });
     const body = readFileSync(join(dir, "design-loop-typography.md"), "utf8");
-    expect(body).toMatch(/^tools: Read, Grep, Glob, Write, Bash$/m);
+    expect(body).toMatch(/^tools: Read, Grep, Glob, Write$/m);
     expect(body).not.toMatch(/WebFetch|WebSearch/);
   });
 });
@@ -61,10 +63,84 @@ describe("staleAgents", () => {
     await syncAgents({ outDir: dir });
     const file = join(dir, "design-loop-typography.md");
     const edited = readFileSync(file, "utf8").replace(
-      "tools: Read, Grep, Glob, Write, Bash",
-      "tools: Read, Grep, Glob, Write, Bash, WebFetch",
+      "tools: Read, Grep, Glob, Write",
+      "tools: Read, Grep, Glob, Write, WebFetch",
     );
+    expect(edited).not.toBe(readFileSync(file, "utf8"));
     writeFileSync(file, edited);
     expect(await staleAgents({ outDir: dir })).toEqual(["design-loop-typography"]);
+  });
+});
+
+// What a generated agent is told is the whole of its brief: there is no API schema on the agent path to hold
+// its answer to a shape, and nothing else it can read explains the digest's notation.
+describe("the generated brief", () => {
+  const CRITIC_FILES = ["typography", "behavioural", "accessibility", "feasibility"].map((c) => `design-loop-${c}.md`);
+  const ALL = [...CRITIC_FILES, "design-loop-chair.md"];
+
+  it("grants no agent a shell", async () => {
+    const dir = outDir();
+    await syncAgents({ outDir: dir });
+    for (const f of ALL) {
+      const tools = /^tools: (.*)$/m.exec(readFileSync(join(dir, f), "utf8"))?.[1];
+      expect(tools?.split(", ")).toEqual(["Read", "Grep", "Glob", "Write"]);
+    }
+  });
+
+  it("never tells an agent to run a command", async () => {
+    const dir = outDir();
+    await syncAgents({ outDir: dir });
+    for (const f of ALL) expect(readFileSync(join(dir, f), "utf8")).not.toMatch(/design-loop inspect|dl inspect/);
+  });
+
+  it("states every critic's output envelope, with its enums, from the validator's own tuples", async () => {
+    const dir = outDir();
+    await syncAgents({ outDir: dir });
+    for (const f of CRITIC_FILES) {
+      const body = readFileSync(join(dir, f), "utf8");
+      for (const key of ["critic", "score", "issues", "id", "severity", "evidence", "selector", "observed", "claim", "fix", "effort", "resolved", "claimed"]) {
+        expect(body).toMatch(new RegExp(`"${key}":`));
+      }
+      expect(body).toContain('"blocker" | "major" | "minor"');
+      expect(body).toContain('"low" | "medium" | "high"');
+    }
+  });
+
+  it("states the chair's output envelope", async () => {
+    const dir = outDir();
+    await syncAgents({ outDir: dir });
+    const body = readFileSync(join(dir, "design-loop-chair.md"), "utf8");
+    expect(body).toMatch(/"prompt": string/);
+    expect(body).toMatch(/"changeIds": string\[\]/);
+    expect(body).toContain("chairInput");
+  });
+
+  it("gives every critic the digest legend and nextIssueId, and points it at digest.json to check a selector", async () => {
+    const dir = outDir();
+    await syncAgents({ outDir: dir });
+    for (const f of CRITIC_FILES) {
+      const body = readFileSync(join(dir, f), "utf8");
+      expect(body).toContain(LEGEND);
+      expect(body).toContain("nextIssueId");
+      expect(body).toContain("digest.json");
+    }
+  });
+});
+
+// Claude Code discovers `~/.claude/agents/` from any project; the CLI runs from the tool's own directory, so a
+// cwd-relative default would put the files where no dispatcher looks. Nothing here writes to the real home.
+describe("where agent definitions live", () => {
+  it("defaults to the user-level agents directory", () => {
+    expect(defaultAgentsDir()).toBe(join(homedir(), ".claude", "agents"));
+  });
+
+  it("sync-agents writes where --agents-dir says", async () => {
+    const dir = outDir();
+    const out: string[] = [];
+    const io = { out: (l: string) => out.push(l), err: () => {} };
+    expect(await main(["sync-agents", "--agents-dir", dir], io)).toBe(0);
+    expect(out).toHaveLength(5);
+    for (const line of out) expect(line.startsWith(`wrote ${dir}/`)).toBe(true);
+    expect(await staleAgents({ outDir: dir })).toEqual([]);
   });
 });

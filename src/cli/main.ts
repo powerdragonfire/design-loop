@@ -11,7 +11,7 @@ import { loadContract } from "../contract/load.js";
 import { AnthropicLlmClient, type LlmClient } from "../critics/llm.js";
 import { buildReport, captureApproval } from "../report/report.js";
 import { createStitchGenerator, type Generator } from "../stitch/adapter.js";
-import { syncAgents } from "./agents.js";
+import { defaultAgentsDir, syncAgents } from "./agents.js";
 import { abDistiller, calibrate } from "./calibrate.js";
 import { inspectVersion } from "./inspect.js";
 import { createProgress, noProgress, promptLines, type Progress, type ProgressMode } from "./progress.js";
@@ -57,7 +57,7 @@ Commands:
   smoke                              check every live service once, before spending real money
   run <screen> [--date YYYY-MM-DD]   generate and critique a screen until a stopping rule fires
   step <runDir>                      advance an agent-mode run by one round
-  sync-agents                        write .claude/agents/ from the critic rubrics
+  sync-agents                        write the agent definitions from the critic rubrics
   review <runDir>                    open the report, then ask which version to approve
   report <runDir>                    build the report page and open it
   approve <runDir> <vNN|cN>          record your pick for a run
@@ -72,7 +72,9 @@ Options:
   --date YYYY-MM-DD                  the run's date (default: today, UTC)
   --repeats N                        calibration repeats per screen (default: 5)
   --selector <css>                   the node to look up, for \`inspect\`
-  --text <substring>                 match nodes by text, for \`inspect\``;
+  --text <substring>                 match nodes by text, for \`inspect\`
+  --agents-dir <dir>                 agent definitions, for \`sync-agents\`, \`run\` and \`step\`
+                                     (default: ~/.claude/agents)`;
 
 /** A mistake in how the command was typed: exit 2 with the reason and the usage. */
 class UsageError extends Error {}
@@ -205,7 +207,7 @@ async function isAgentMode(designDir: string): Promise<boolean> {
  * tell "dispatch these agents and call me again" apart from "the run is finished".
  */
 async function stepCommand(
-  d: Deps, io: Io, progress: Progress, designDir: string, runDir?: string, screen?: string, date?: string,
+  d: Deps, io: Io, progress: Progress, designDir: string, agentsDir: string, runDir?: string, screen?: string, date?: string,
 ): Promise<number> {
   // A resumed run says which screen and date it is for; only the first step is told.
   const identity = runDir === undefined ? { screen: screen!, date: date! } : await d.runIdentity(runDir);
@@ -213,7 +215,7 @@ async function stepCommand(
     designDir, ...identity, runDir, generator: d.makeGenerator(), log: (line) => io.out(line), progress,
     // Every real agent-mode run checks its agent files; only `stepRun`'s own unit tests, which construct
     // this option directly, ever leave it unset.
-    agentsDir: join(process.cwd(), ".claude", "agents"),
+    agentsDir,
   });
   if (!out.done) {
     io.out(`Run: ${out.runDir}`);
@@ -234,11 +236,13 @@ async function stepCommand(
   return out.result.stopReason === "aborted" ? 3 : 0;
 }
 
-async function runCommand(d: Deps, io: Io, progress: Progress, designDir: string, screen: string, date: string): Promise<number> {
+async function runCommand(
+  d: Deps, io: Io, progress: Progress, designDir: string, agentsDir: string, screen: string, date: string,
+): Promise<number> {
   // In agent mode `run` IS the first step: the critics are subagents this process cannot call, so the round
   // suspends as soon as they are needed. The preflight is skipped with it — it authenticates an Anthropic key
   // that an agent-mode run never uses, and failing on a key nobody needs would block the whole mode.
-  if (await isAgentMode(designDir)) return await stepCommand(d, io, progress, designDir, undefined, screen, date);
+  if (await isAgentMode(designDir)) return await stepCommand(d, io, progress, designDir, agentsDir, undefined, screen, date);
   await progress.phase("check credentials", () => d.preflight());
   const generator = d.makeGenerator();
   const result = await d.runScreen({
@@ -317,7 +321,7 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
         options: {
           design: { type: "string" }, date: { type: "string" }, repeats: { type: "string" }, help: { type: "boolean" },
           quiet: { type: "boolean" }, verbose: { type: "boolean" },
-          selector: { type: "string" }, text: { type: "string" },
+          selector: { type: "string" }, text: { type: "string" }, "agents-dir": { type: "string" },
         },
         allowPositionals: true,
         strict: true,
@@ -342,6 +346,8 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
 
     if (values.quiet && values.verbose) throw new UsageError("--quiet and --verbose cannot be used together");
     const designDir = values.design ?? "design";
+    // One value for the writer (`sync-agents`) and the checker (`run`/`step`), so they cannot disagree.
+    const agentsDir = values["agents-dir"] ?? defaultAgentsDir();
     const mode: ProgressMode = values.quiet ? "quiet" : values.verbose ? "verbose" : "normal";
     progress = io.makeProgress?.(mode) ?? noProgress;
     const d: Deps = { ...defaultDeps(designDir, io, progress, mode), ...overrides };
@@ -351,15 +357,15 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
         need(1, "one argument: <screen>");
         const date = values.date ?? d.now().toISOString().slice(0, 10);
         if (!DATE.test(date)) throw new UsageError(`--date must be YYYY-MM-DD (got ${date})`);
-        return await runCommand(d, io, progress, designDir, args[0]!, date);
+        return await runCommand(d, io, progress, designDir, agentsDir, args[0]!, date);
       }
       case "step": {
         need(1, "one argument: <runDir>");
-        return await stepCommand(d, io, progress, designDir, args[0]!);
+        return await stepCommand(d, io, progress, designDir, agentsDir, args[0]!);
       }
       case "sync-agents": {
         need(0, "no arguments");
-        const written = await syncAgents({ outDir: join(process.cwd(), ".claude", "agents") });
+        const written = await syncAgents({ outDir: agentsDir });
         for (const f of written) io.out(`wrote ${f}`);
         return 0;
       }

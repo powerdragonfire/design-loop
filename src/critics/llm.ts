@@ -99,7 +99,8 @@ export async function runCommittee(input: CriticInput, cfg: Config, llm: LlmClie
 
 // ---- the Anthropic client ----------------------------------------------------
 
-const LEGEND =
+/** The key to the digest's notation. Exported so `dl sync-agents` puts the same words into every agent critic's brief. */
+export const LEGEND =
   "A style property absent from a digest line has its initial value (0px, normal, none, static, auto, transparent). " +
   "`d=N` is nesting depth from `<body>` (0 = direct child). " +
   "Colours are `rgb()`/`rgba()` only; `effectiveBackground` is the painted background behind the node.";

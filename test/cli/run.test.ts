@@ -288,7 +288,7 @@ describe("runScreen", () => {
     // The candidate stage runs before anything is written: a wholly unscoreable candidate (and, with
     // one family and no variants, the only candidate there is) leaves pickWinner nothing to choose.
     await expect(run(dir, gen, llmOf([90], () => denied).llm, chairOf().client))
-      .rejects.toThrow(/no candidate could be scored/);
+      .rejects.toThrow(/no candidate could be scored.*typography: invalid x-api-key/);
     expect(existsSync(join(runDir(dir), "manifest.json"))).toBe(false);
   });
 

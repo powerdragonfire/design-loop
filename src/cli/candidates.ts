@@ -123,7 +123,12 @@ export type SelectOptions = GenerateOptions & {
  */
 export function pickWinner(rows: CandidateRow[], sigma: number): CandidateRow {
   const scored = rows.filter((r) => r.failed === undefined);
-  if (scored.length === 0) throw new Error("no candidate could be scored: every committee failed");
+  // Every row's own `failed` already names its critic and cause; losing that here would leave an operator
+  // staring at "every committee failed" with no way to tell an expired API key from a genuine outage.
+  if (scored.length === 0) {
+    const why = rows.map((r) => `${r.id}: ${r.failed}`).join("; ");
+    throw new Error(`no candidate could be scored: ${why}`);
+  }
   const leader = Math.max(...scored.map((r) => r.composite));
   const tied = scored.filter((r) => r.composite >= leader - sigma);
   return tied.sort((a, b) => a.blockers - b.blockers || b.composite - a.composite || a.id.localeCompare(b.id))[0]!;
@@ -156,7 +161,7 @@ export async function selectCandidate(opts: SelectOptions): Promise<Selection> {
     for (const f of committee.failures) opts.onDegraded(f.critic, f.error, c.id);
     const base = { id: c.id, family: c.family, prompt: c.prompt, handle: c.handle, png, html, doc };
     if (committee.critiques.length === 0) {
-      rows.push({ ...base, composite: 0, blockers: 0, gatePass: false, critiques: [], open: [], failed: `committee unavailable: ${committee.failures.map((f) => f.error).join("; ")}` });
+      rows.push({ ...base, composite: 0, blockers: 0, gatePass: false, critiques: [], open: [], failed: `committee unavailable: ${committee.failures.map((f) => `${f.critic}: ${f.error}`).join("; ")}` });
       continue;
     }
     const validated = validateEvidence(committee.critiques, doc);

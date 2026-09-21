@@ -1,4 +1,5 @@
-import { versionName, readChair, type RoundCursor } from "../store/store.js";
+import { join } from "node:path";
+import { versionName, readChair, writeAtomic, type RoundCursor } from "../store/store.js";
 import { WorkOrderPending } from "../critics/agent.js";
 import type { ChairClient, ChairInput } from "./chair.js";
 import type { Issue } from "../types.js";
@@ -29,7 +30,15 @@ export class AgentChairClient implements ChairClient {
     // newer answer sitting in the inbox and silently change a past decision (same invariant as the
     // critics' client). readChair validates non-blankness itself; a blank prompt throws from there.
     const raw = (await readChair(this.runDir, version, "version")) ?? (await readChair(this.runDir, version, "inbox"));
-    if (raw === null) throw new WorkOrderPending("chair", version, []);
+    if (raw === null) {
+      // The agent is briefed from the very `ChairInput` its answer is resolved against below, written out
+      // before suspending. Built anywhere else — from `open-issues.json`, say — it would show the chair the
+      // per-selector token ids rather than the grouped ones, every id it picked from that family would
+      // resolve to nothing, and a later change to what `run.ts` hands the chair would never reach this mode.
+      const screenshot = chairScreenshot(input, version);
+      await writeAtomic(join(this.runDir, version, "chair-input.json"), `${JSON.stringify(chairInputFile(input, screenshot), null, 2)}\n`);
+      throw new WorkOrderPending("chair", version, [], screenshot);
+    }
 
     // Resolved against openIssues only, via a Set: an id naming nothing is silently dropped rather than
     // fabricated into an issue, and a duplicated id cannot produce a duplicated change.
@@ -46,3 +55,21 @@ export class AgentChairClient implements ChairClient {
   // matching comment on AgentLlmClient (src/critics/agent.ts) — omitting it entirely, rather than
   // defining one that returns undefined, is what keeps `takeUsage` genuinely absent rather than present.
 }
+
+/**
+ * The screenshot `input.imagePng` holds, as a path relative to the run directory. After a regression the
+ * chair works on the best version and `runScreen` hands it that version's image; otherwise it is this round's.
+ */
+const chairScreenshot = (input: ChairInput, version: string): string =>
+  `${input.regression?.bestVersion ?? version}/screen.png`;
+
+/**
+ * What `AnthropicChairClient` sends the model, as a file: the open issues, the regression block and the
+ * tokens, with the image as a path. `critiques` is left out because the API chair never sends it either.
+ */
+const chairInputFile = (input: ChairInput, screenshot: string) => ({
+  screenshot,
+  openIssues: input.openIssues,
+  regression: input.regression,
+  tokens: input.tokens,
+});

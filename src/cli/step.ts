@@ -44,6 +44,8 @@ interface WorkUnit {
   critic: CriticName | "chair";
   agent: string;
   output: string;
+  /** Critics only: where this critic's NEW issues start numbering (`PendingUnit.nextIssueId`). */
+  nextIssueId?: string;
   /**
    * `null`, not omitted, for an input this critic is deliberately not shown. An absent key reads as an
    * oversight; an explicit null says the file exists and this agent is not to read it.
@@ -53,27 +55,32 @@ interface WorkUnit {
 
 const rel = (version: string, file: string): string => `${version}/${file}`;
 
-function unitsFor(kind: "critics" | "chair", version: string, screen: string, pending: CriticName[]): WorkUnit[] {
-  if (kind === "chair") {
+function unitsFor(pending: WorkOrderPending, screen: string): WorkUnit[] {
+  const { version } = pending;
+  if (pending.kind === "chair") {
+    // No fallback to this round's screen.png: after a regression that is the wrong image, which is the bug
+    // this field exists to close.
+    if (pending.screenshot === undefined) throw new Error(`chair pending for ${version} without a screenshot`);
     return [{
       critic: "chair",
       agent: "design-loop-chair",
       output: rel(version, "inbox/chair.json"),
+      // Both written by `AgentChairClient` from the `ChairInput` its answer is resolved against: the grouped
+      // open issues, the regression block, and after a regression the BEST version's screenshot, not this one.
       inputs: {
-        screenshot: rel(version, "screen.png"),
-        openIssues: rel(version, "open-issues.json"),
-        critiques: rel(version, "critiques"),
-        tokens: "tokens.json",
+        chairInput: rel(version, "chair-input.json"),
+        screenshot: pending.screenshot,
       },
     }];
   }
   // Ordered by the committee's own list, never by the order the missing files were noticed: those are read
   // concurrently, so arrival order is the filesystem's business and would make the file differ run to run.
-  const waiting = new Set<CriticName>(pending);
+  const waiting = new Map(pending.units.map((u) => [u.critic, u] as const));
   return LLM_CRITICS.filter((critic) => waiting.has(critic)).map((critic) => ({
     critic,
     agent: `design-loop-${critic}`,
     output: rel(version, `inbox/${critic}.json`),
+    nextIssueId: waiting.get(critic)!.nextIssueId,
     inputs: {
       digest: rel(version, "digest.txt"),
       screenshot: rel(version, "screen.png"),
@@ -104,7 +111,7 @@ export async function writeWorkOrder(opts: {
     designDir: resolve(designDir),
     runDir: resolve(runDir),
     concurrency: 4,
-    units: unitsFor(pending.kind, pending.version, screen, pending.units.map((u) => u.critic)),
+    units: unitsFor(pending, screen),
   }, null, 2)}\n`);
   return file;
 }

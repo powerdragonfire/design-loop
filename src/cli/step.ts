@@ -145,8 +145,6 @@ export async function stepRun(opts: StepOptions): Promise<StepResult> {
   try {
     const result = await runScreen({
       designDir, screen, date, log, progress,
-      // Never `generator.fromId`: a handle taken from there skips this wrapper, so its `edit` does not advance
-      // the cursor and the next round is generated again instead of replayed. `generate` is the only way in.
       generator: resumingGenerator({ runDir, inner: generator, cursor }),
       measure: resumingMeasure({ runDir, inner: opts.measure ?? measure }),
       llm,

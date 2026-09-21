@@ -82,8 +82,9 @@ export function resumingGenerator(opts: { runDir: string; inner: Generator; curs
   };
 
   return {
+    // No `fromId`: a handle rebuilt through it would skip `acquire`, so its `edit` would not advance the cursor
+    // and the next round would be generated again instead of replayed. `generate` is the only way in.
     generate: (prompt) => acquire(() => inner.generate(prompt)),
-    fromId: inner.fromId?.bind(inner),
   };
 }
 

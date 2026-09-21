@@ -44,10 +44,10 @@ design/
 | `smoke` | Calls every live service once — a critic call, the same call again to prove the prompt cache hits, a chair call, a Stitch generate AND edit, then `measure()` on the real Stitch page — and prints PASS/FAIL/SKIP per step. Run it first. | 2 Stitch generations, ~$0.30 |
 | `calibrate [--repeats N]` | Scores each `reference/` screen N times and writes the composite's noise floor into `config.json` as `sigma`, plus `.design-loop/calibration.json`. Re-run it after changing the critic model or the weights. | ~$2.20 at 5 repeats |
 | `ab-distiller` | Critiques each reference screen twice, once from the digest and once from raw HTML, and lists the claims only the raw HTML produced. Whatever it lists is a field `measure`'s `STYLE_PROPS` is missing. | ~$8 |
-| `sync-agents` | Writes `.claude/agents/design-loop-<critic>.md` and the chair's agent file from the critic rubrics baked into this build. Agent mode only — `run`/`step` refuse to dispatch a subagent against a stale one. Re-run it after upgrading. | free |
+| `sync-agents [--agents-dir <dir>]` | Writes `design-loop-<critic>.md` and the chair's agent file from the critic rubrics baked into this build, into `~/.claude/agents/` so Claude Code finds them from any project. Agent mode only — `run`/`step` refuse to dispatch a subagent against a stale one, and check the same directory (pass them the same `--agents-dir` if you override it). Re-run it after upgrading. The copies under this repo's `.claude/agents/` are a reference, not what is dispatched. | free |
 | `run <screen> [--date YYYY-MM-DD]` | Generates `families × (1 + variantsPerFamily)` candidates (config's `candidates` section — see [Generating more than one candidate](#generating-more-than-one-candidate); the default, `families: 1, variantsPerFamily: 0`, is one generation, today's behaviour), scores and selects one, promotes it to `v00`, then the edit loop. In `criticMode: "api"` it runs to completion, showing each step live, then prints the stop reason, the versions, the spend and the report path. In `criticMode: "agent"` it IS the first `step`: it suspends on the first round's critics and exits 10. | ~$1.06 per screen by default; ~$2.30 with the six-candidate example below, see the caveat there; not metered in agent mode |
 | `step <runDir>` | Advances a suspended agent-mode run by one round. Everything already answered on disk is replayed for free; the first thing nobody has answered yet stops the run again and writes a `work-order.json` naming which subagents to dispatch. Keep calling it until it exits 0. | free (the round's own Stitch generation aside) |
-| `inspect <versionDir> [--selector <css> \| --text <substring>]` | Looks up measured nodes from a version's digest by selector or text. The tool an agent-mode critic uses to check a claim against the real page before writing it — not usually run by hand. | free |
+| `inspect <versionDir> [--selector <css> \| --text <substring>]` | Looks up measured nodes from a version's digest by selector or text, for a person checking a critic's claim against the real page. Agent-mode critics have no shell; they read the same `vNN/digest.json` directly. | free |
 | `review <runDir>` | Builds the report, opens it, and asks which version to approve. | free |
 | `report <runDir>` | Builds the report page and opens it, approving nothing. | free |
 | `approve <runDir> <vNN\|cN>` | Records your pick — a version or a candidate — in the manifest and in `vNN/approved.json` or `candidates/<id>/approved.json`. | free |
@@ -166,10 +166,23 @@ than `~/Projects/design-loop`, set `DESIGN_LOOP_HOME`.
 - **Agent mode is not calibrated.** `calibrate` still runs through the API, so an agent-mode run
   inherits an API-mode sigma and warns loudly about it. Its spend is not metered either: subagent
   tokens never reach the CLI.
-- **Agent mode cannot drop a critic.** In api mode, a critic that errors or fails validation is dropped
+- **Agent mode cannot drop a critic.** In API mode, a critic that errors or fails validation is dropped
   from the round and the rest of the committee's weights are renormalised over the survivors. That path
   is only reachable by a critique that exists on disk and fails validation, and `SKILL.md` will not let
   Claude write one on a critic's behalf — a critique Claude wrote standing in for a critic that could not
   produce one would be a fabricated critique, not a degraded round. So in agent mode a critic that cannot
   answer halts the round instead of being dropped from it, and `step` keeps waiting until the operator
-  decides what to do about it. Api mode is unaffected.
+  decides what to do about it. API mode is unaffected.
+- **An agent's file access is limited by its brief, not enforced.** The generated agents get `Read`, `Grep`,
+  `Glob` and `Write` and no shell, so no network. But agent frontmatter cannot scope a tool to a path, so
+  nothing but the brief stops a critic reading beyond its inputs or writing a file other than its own output,
+  including another critic's inbox file or the chair's.
+- **A dropped critic's answer is not archived.** Answered critics and the chair are replayed from an archive,
+  but a critic dropped for a malformed file is re-read from `inbox/` on every replay. Delete that file after
+  the round is scored and a later `step` suspends inside an already-scored version; replace it with a valid
+  one and the replay scores that round with four critics while `vNN/composite.json` records three, so the
+  manifest and the version directory disagree. This should be fixed before agent mode is used for any run
+  whose manifest matters.
+- **Nothing stops two `step` processes writing one run at once.** Both would pay for the same Stitch edit and
+  interleave their writes in one `vNN/`. Run one `step` at a time per run directory. This too should be fixed
+  before agent mode is used for any run whose manifest matters.

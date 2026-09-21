@@ -173,7 +173,7 @@ export function createSdkProject(projectId: string, callTool: CallTool = default
           variantOptions: opts,
         }),
         "generate_variants",
-      ).map(screenOf),
+      ).map((data) => makeScreen(projectId, callTool, data)),
   };
 }
 

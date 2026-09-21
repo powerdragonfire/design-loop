@@ -71,6 +71,7 @@ describe("resumingGenerator", () => {
     // fromId returns a handle whose downloads throw, exactly as a Stitch handle rebuilt from an id does.
     const refusing: Generator = {
       generate: async () => { throw new Error("generate must not be called"); },
+      variants: async () => { throw new Error("variants must not be called"); },
       fromId: (id) => ({
         id,
         edit: async () => { throw new Error("edit must not be called"); },
@@ -89,7 +90,10 @@ describe("resumingGenerator", () => {
     const quotaDir = mkdtempSync(join(tmpdir(), "dl-quota-"));
     let generates = 0;
     const inner = new StitchGenerator({
-      project: { generate: async () => { generates++; throw new Error("Stitch was called"); } },
+      project: {
+        generate: async () => { generates++; throw new Error("Stitch was called"); },
+        variants: async () => { throw new Error("Stitch variants were called"); },
+      },
       projectId: "proj-1",
       quotaDir,
     });
@@ -110,6 +114,7 @@ describe("resumingGenerator", () => {
         prompts.push(prompt);
         return { id: "live-0", edit: async () => ({}) as Screen, getHtml: async () => html(9), getImage: async () => Buffer.from("live") };
       },
+      variants: async () => { throw new Error("variants must not be called"); },
     };
     const cursor: RoundCursor = { index: -1 };
     const gen = resumingGenerator({ runDir, inner: plain, cursor });

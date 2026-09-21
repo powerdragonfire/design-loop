@@ -85,6 +85,12 @@ export function resumingGenerator(opts: { runDir: string; inner: Generator; curs
     // No `fromId`: a handle rebuilt through it would skip `acquire`, so its `edit` would not advance the cursor
     // and the next round would be generated again instead of replayed. `generate` is the only way in.
     generate: (prompt) => acquire(() => inner.generate(prompt)),
+    // Variants are not replayable: they have no version directory to be served from and no cursor slot, so
+    // passing them through would re-pay Stitch on every step. Refused rather than guessed at until the resume
+    // layer is taught about candidates.
+    variants: async () => {
+      throw new Error("the resume layer cannot replay candidate variants: agent mode needs variantsPerFamily: 0");
+    },
   };
 }
 

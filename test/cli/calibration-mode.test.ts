@@ -9,7 +9,8 @@ const cfg = (over: Partial<Config> = {}): Config => ({
   sigma: 1.8, maxRounds: 5, convergenceSigmas: 1, convergenceRounds: 2,
   models: { critic: "claude-sonnet-5", chair: "claude-opus-5" },
   weights: { typography: 0.2, behavioural: 0.2, accessibility: 0.2, tokenConformance: 0.2, feasibility: 0.2 },
-  batchMode: false, criticMode: "api", ...over,
+  batchMode: false, criticMode: "api",
+  candidates: { families: 1, variantsPerFamily: 0, creativeRange: "EXPLORE", aspects: [] }, ...over,
 });
 
 const withCalibration = (body: object): string => {

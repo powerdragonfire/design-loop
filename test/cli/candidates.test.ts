@@ -76,6 +76,7 @@ function cfg(over: Partial<Config["candidates"]> = {}): Config {
     weights: { typography: 0.25, behavioural: 0.2, accessibility: 0.2, tokenConformance: 0.2, feasibility: 0.15 },
     batchMode: false,
     candidates: { families: 1, variantsPerFamily: 0, creativeRange: "EXPLORE", aspects: [], ...over },
+    criticMode: "api",
   };
 }
 

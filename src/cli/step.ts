@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import { AgentChairClient } from "../chair/agent.js";
 import { AgentLlmClient, WorkOrderPending } from "../critics/agent.js";
 import { LLM_CRITICS } from "../critics/llm.js";
+import { staleAgents } from "./agents.js";
 import { measure } from "../measure/measure.js";
 import { openExistingRun, openRun, writeAtomic } from "../store/store.js";
 import type { Generator } from "../stitch/adapter.js";
@@ -21,6 +22,13 @@ export interface StepOptions {
   progress?: Progress;
   /** Replaced only by tests that must not drive a browser; production always renders the page. */
   measure?: (html: string) => Promise<MeasuredDoc>;
+  /**
+   * Where `.claude/agents/` lives, so a work order can be checked against it before it is written. Left
+   * undefined, no staleness check runs at all — tests that only care about the run loop's own behaviour are
+   * not required to keep a synced agents directory on disk just to call `stepRun`. Production always passes
+   * it (`main.ts` defaults to `<cwd>/.claude/agents`), because every real agent-mode run needs the check.
+   */
+  agentsDir?: string;
 }
 
 export type StepResult =
@@ -142,6 +150,18 @@ export async function stepRun(opts: StepOptions): Promise<StepResult> {
     // `runCommittee` settles every critic before `throwIfPending` is allowed to throw, so one work order names
     // them all and a dispatcher never has to step four times to learn about four missing files.
     if (err instanceof WorkOrderPending) {
+      // Checked here, not at the top of `stepRun`: a round that finishes without ever needing a critic or
+      // chair dispatch (everything already answered on disk) has no business failing over agent files it
+      // never consults. Only the moment a work order is actually about to be written does the check matter.
+      if (opts.agentsDir !== undefined) {
+        const stale = await staleAgents({ outDir: opts.agentsDir });
+        if (stale.length > 0) {
+          throw new Error(
+            `these agent definitions are missing or out of date: ${stale.join(", ")}. ` +
+              "Run `design-loop sync-agents` — a critic running an old rubric scores against the wrong standard.",
+          );
+        }
+      }
       return { done: false, workOrder: await writeWorkOrder({ runDir, designDir, screen, pending: err }), runDir };
     }
     // Deliberately no `llm.throwIfPending()` here. `runScreen` already calls it the moment the committee

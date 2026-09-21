@@ -30,6 +30,8 @@ export interface RunOptions {
   log?: (line: string) => void;
   /** What a person watching sees: each step as it starts and ends, with how long it took. */
   progress?: Progress;
+  /** Replaced by the resume layer so a replayed round reads its stored doc instead of re-rendering the page. */
+  measure?: (html: string) => Promise<MeasuredDoc>;
 }
 
 export interface RunResult {
@@ -69,6 +71,7 @@ const toSummary = (r: CandidateRow): CandidateSummary => ({
 export async function runScreen(opts: RunOptions): Promise<RunResult> {
   const { designDir, screen, date, generator, llm, chairClient, log } = opts;
   const progress = opts.progress ?? noProgress;
+  const measureDoc = opts.measure ?? measure;
 
   // Everything that can fail cheaply fails here: before any spend and before any directory exists.
   const contract = await loadContract(designDir, {}, screen);
@@ -248,7 +251,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
         async () => [await handle.getHtml(), await handle.getImage()] as const,
         ([h, p]) => `${Math.round(h.length / 1024)} KB html, ${Math.round(p.length / 1024)} KB png`,
       );
-      const doc = await progress.phase("measure", () => measure(html), (d) => `${d.nodes.length} nodes`);
+      const doc = await progress.phase("measure", () => measureDoc(html), (d) => `${d.nodes.length} nodes`);
       const det = deterministicCritique(doc, contract.tokens);
       const digest = distill(doc);
 

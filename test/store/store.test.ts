@@ -206,14 +206,49 @@ describe("store", () => {
 
   it("approves a candidate id as readily as a version id", async () => {
     const run = await openRun(dir, "home", "2026-09-20");
+    await run.writeVersion(v(0, 70));
     await run.writeCandidate({ id: "c2", family: 1, png: Buffer.from("p"), html: "<p/>", doc, critiques, composite: 80, gatePass: false, prompt: "P", openIssues: [] });
+    await run.finalise(fin({ committeeRank: ["v00"] }));
     await run.approve("c2");
-    expect(JSON.parse(await readFile(join(run.dir, "candidates/c2/approved.json"), "utf8")).approved).toBe("c2");
+    expect(JSON.parse(await readFile(join(run.dir, "candidates/c2/approved.json"), "utf8")).version).toBe("c2");
+    expect(read(join(run.dir, "manifest.json")).humanPick).toBe("c2");
   });
 
   it("refuses an id that could escape the run directory", async () => {
     const run = await openRun(dir, "home", "2026-09-20");
     await expect(run.promoteCandidate("../escape")).rejects.toThrow(/becomes part of a directory name/);
+  });
+
+  it("refuses to promote a candidate that was never written", async () => {
+    const run = await openRun(dir, "home", "2026-09-20");
+    await expect(run.promoteCandidate("c9")).rejects.toThrow(/no such candidate/);
+  });
+
+  it("refuses to promote a second candidate once v00 is taken", async () => {
+    const run = await openRun(dir, "home", "2026-09-20");
+    await run.writeCandidate({ id: "c0", family: 0, png: Buffer.from("a"), html: "<p/>", doc, critiques, composite: 80, gatePass: false, prompt: "P", openIssues: [] });
+    await run.writeCandidate({ id: "c1", family: 1, png: Buffer.from("b"), html: "<p/>", doc, critiques, composite: 90, gatePass: true, prompt: "P", openIssues: [] });
+    await run.promoteCandidate("c0");
+    await expect(run.promoteCandidate("c1")).rejects.toThrow(/already exists/);
+    // The failed promotion registered no second v00 entry: v00 still reads as c0's payload.
+    expect(await readFile(join(run.dir, "v00/screen.png"))).toEqual(Buffer.from("a"));
+  });
+
+  it("writes the selection alongside the candidates it chose between", async () => {
+    const run = await openRun(dir, "home", "2026-09-20");
+    await run.writeCandidate({ id: "c0", family: 0, png: Buffer.from("a"), html: "<p/>", doc, critiques, composite: 60, gatePass: false, prompt: "P", openIssues: [] });
+    await run.writeCandidate({ id: "c1", family: 1, png: Buffer.from("b"), html: "<p/>", doc, critiques, composite: 90, gatePass: true, prompt: "P", openIssues: [] });
+    await run.writeSelection({
+      winner: "c1",
+      rows: [
+        { id: "c0", family: 0, composite: 60, blockers: 2, gatePass: false },
+        { id: "c1", family: 1, composite: 90, blockers: 0, gatePass: true },
+      ],
+    });
+    const s = read(join(run.dir, "candidates", "selection.json"));
+    expect(s.winner).toBe("c1");
+    expect(s.rows).toHaveLength(2);
+    expect(s.rows.find((r: { id: string }) => r.id === "c1")).toEqual({ id: "c1", family: 1, composite: 90, blockers: 0, gatePass: true });
   });
 });
 
@@ -271,5 +306,19 @@ describe("openExistingRun", () => {
     await first.writeVersion(v(0, 70));
     const later = await openExistingRun(first.dir);
     await expect(later.approve("v00")).rejects.toThrow(/not finalised/);
+  });
+
+  const doc = { viewport: { w: 393, h: 852 }, nodes: [] };
+  const critiques: never[] = [];
+
+  it("approves a candidate id from a freshly reopened run, the only way the CLI ever approves anything", async () => {
+    const first = await openRun(dir, "home", "2026-09-18");
+    await first.writeVersion(v(0, 70));
+    await first.writeCandidate({ id: "c3", family: 0, png: Buffer.from("p"), html: "<p/>", doc, critiques, composite: 80, gatePass: false, prompt: "P", openIssues: [] });
+    await first.finalise(fin({ committeeRank: ["v00"] }));
+    const later = await openExistingRun(first.dir);
+    await later.approve("c3");
+    expect(existsSync(join(first.dir, "candidates", "c3", "approved.json"))).toBe(true);
+    expect(read(join(first.dir, "manifest.json")).humanPick).toBe("c3");
   });
 });

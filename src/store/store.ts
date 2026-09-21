@@ -163,14 +163,26 @@ async function writeScreenDir(base: string, p: ScreenPayload): Promise<void> {
   ]);
 }
 
-/** Builds a Run over `dir` from what is already known; `openRun` starts empty, `openExistingRun` rebuilds. */
-function makeRun(dir: string, screen: string, date: string, versions: VersionSummary[], existing: Manifest | null): Run {
+/**
+ * Builds a Run over `dir` from what is already known; `openRun` starts empty, `openExistingRun` rebuilds
+ * both `versions` and `knownCandidates` from disk, since a fresh process is the only way the CLI ever
+ * approves anything.
+ */
+function makeRun(
+  dir: string,
+  screen: string,
+  date: string,
+  versions: VersionSummary[],
+  existing: Manifest | null,
+  knownCandidates: string[] = [],
+): Run {
   let manifest = existing;
   const manifestFile = join(dir, "manifest.json");
   const written = (version: string): boolean => versions.some((s) => s.version === version);
-  // Populated as writeCandidate runs, so approve can recognise a candidate id without it ever
-  // appearing in `versions` — that list stays reserved for what finalise's committeeRank checks against.
-  const candidateIds: string[] = [];
+  // Populated as writeCandidate runs (and seeded from disk on reopen), so approve can recognise a
+  // candidate id without it ever appearing in `versions` — that list stays reserved for what
+  // finalise's committeeRank checks against.
+  const candidateIds: string[] = [...knownCandidates];
 
   return {
     dir,
@@ -231,8 +243,24 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
     async promoteCandidate(id) {
       assertSegment("candidate id", id);
       const src = join(dir, "candidates", id);
-      const summary = await parseFile<{ composite: number; gatePass: boolean }>(join(src, "composite.json"));
-      await cp(src, join(dir, "v00"), { recursive: true });
+      let summary: { composite: number; gatePass: boolean };
+      try {
+        summary = await parseFile(join(src, "composite.json"));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`no such candidate ${id}`);
+        throw err;
+      }
+      const dest = join(dir, "v00");
+      // Claims v00 the same way writeVersion claims a version directory: a plain mkdir, so a second
+      // promotion in the same run fails loudly instead of cp merging into (and versions gaining a
+      // duplicate entry for) an already-complete v00.
+      try {
+        await mkdir(dest);
+      } catch (err) {
+        if (isExists(err)) throw new Error("version v00 already exists");
+        throw err;
+      }
+      await cp(src, dest, { recursive: true });
       versions.push({ version: "v00", composite: summary.composite, gatePass: summary.gatePass });
       return "v00";
     },
@@ -263,25 +291,23 @@ function makeRun(dir: string, screen: string, date: string, versions: VersionSum
 
     async approve(id) {
       assertSegment("id", id);
-      // A candidate is approvable before the run is ever finalised - approving one is choosing which
-      // candidate becomes v00, not reviewing a finished round - so it skips the manifest entirely and
-      // never touches humanPick.
-      if (candidateIds.includes(id)) {
-        await writeAtomic(join(dir, "candidates", id, "approved.json"), json({ approved: id, at: new Date().toISOString() }));
-        return;
-      }
       if (!manifest) throw new Error("run is not finalised: finalise it before approving a version");
-      if (!written(id)) throw new Error(`no such version ${id}`);
+      const isVersion = written(id);
+      if (!isVersion && !candidateIds.includes(id)) throw new Error(`no such version ${id}`);
+      const target = isVersion ? id : join("candidates", id);
       // The manifest's humanPick is the only ground truth, so it must never lag the approval: write the new
       // approval, then the manifest, and only then clear the old approvals. A failure in between leaves at worst
       // a stale second approved.json, which a retry clears; readers treat manifest.humanPick as authoritative.
-      await writeAtomic(join(dir, id, "approved.json"), json({ version: id, approvedAt: new Date().toISOString() }));
+      // A candidate approval takes this same path - the run is finalised long before a human reads the
+      // report and picks, so there is always a manifest to update by the time anyone approves anything.
+      await writeAtomic(join(dir, target, "approved.json"), json({ version: id, approvedAt: new Date().toISOString() }));
       const next = { ...manifest, humanPick: id, agreedWithTop: id === manifest.committeeRank[0] };
       await writeAtomic(manifestFile, json(next));
       manifest = next;
-      await Promise.all(
-        versions.filter((s) => s.version !== id).map((s) => rm(join(dir, s.version, "approved.json"), { force: true })),
-      );
+      await Promise.all([
+        ...versions.filter((s) => s.version !== id).map((s) => rm(join(dir, s.version, "approved.json"), { force: true })),
+        ...candidateIds.filter((c) => c !== id).map((c) => rm(join(dir, "candidates", c, "approved.json"), { force: true })),
+      ]);
     },
   };
 }
@@ -372,5 +398,15 @@ export async function openExistingRun(runDir: string): Promise<Run> {
   const named = /^(\d{4}-\d{2}-\d{2})-(.+?)(?:-\d+)?$/.exec(basename(runDir));
   const screen = typeof manifest?.screen === "string" ? manifest.screen : (named?.[2] ?? basename(runDir));
   const date = typeof manifest?.date === "string" ? manifest.date : (named?.[1] ?? "");
-  return makeRun(runDir, screen, date, versions, manifest);
+
+  // The candidate directories are the same source of truth as the files `approve` writes into, so they
+  // are scanned directly rather than trusted from `selection.json` - a run with no `candidates/` at all
+  // (or a missing/malformed selection.json) still reopens exactly as before.
+  let candidateIds: string[] = [];
+  if (entries.some((e) => e.isDirectory() && e.name === "candidates")) {
+    const sub = await readdir(join(runDir, "candidates"), { withFileTypes: true });
+    candidateIds = sub.filter((e) => e.isDirectory()).map((e) => e.name);
+  }
+
+  return makeRun(runDir, screen, date, versions, manifest, candidateIds);
 }

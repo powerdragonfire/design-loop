@@ -249,6 +249,10 @@ export class FakeGenerator implements Generator {
     const index = Number(id.replace("fake-", ""));
     const spec = this.script[index];
     if (!spec) throw new Error(`no fake screen ${id}`);
+    // Rebuilding a handle re-enters the script at that screen, so the next edit must produce the entry AFTER
+    // it. Without this the fake hands an edit the screen it was just rebuilt from, which reads as "the edit
+    // changed nothing" — the exact failure a resumed run exists to rule out.
+    this.next = Math.max(this.next, index + 1);
     return {
       id,
       edit: (prompt) => this.generate(prompt),

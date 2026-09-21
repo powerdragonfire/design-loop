@@ -131,6 +131,18 @@ export function versionName(index: number): string {
   return `v${String(index).padStart(2, "0")}`;
 }
 
+/**
+ * Which round the loop is on. The resuming generator sets it; the agent critic and chair clients read it to
+ * find the version directory they belong to. `runScreen` performs exactly one generate-or-edit per round, in
+ * order, so a counter incremented there IS the current version index. Nothing else may write to it.
+ *
+ * It lives here, beside `versionName`, rather than in the resume layer: the clients that read it sit below the
+ * CLI, and making them import from `src/cli/` would invert the layering.
+ */
+export interface RoundCursor {
+  index: number;
+}
+
 const isExists = (err: unknown): boolean => (err as NodeJS.ErrnoException).code === "EEXIST";
 
 /** Refuses a name that could point outside the runs directory. */

@@ -18,6 +18,7 @@ const deps = (over: Partial<Deps> = {}): Partial<Deps> => ({
   makeLlm: vi.fn(() => ({ critique: vi.fn() }) as any),
   makeChair: vi.fn(() => ({ synthesise: vi.fn() }) as any),
   committeePick: vi.fn(async () => "v01"),
+  candidateWinner: vi.fn(async () => undefined),
   preflight: vi.fn(async () => {}),
   openInBrowser: vi.fn(async () => {}),
   ask: vi.fn(async () => ""),
@@ -140,6 +141,37 @@ describe("main", () => {
     const d = deps({ captureApproval: vi.fn(async () => { throw new Error("no such version: v09"); }) });
     expect(await main(["approve", "/r", "v09"], c.io, d)).toBe(1);
     expect(c.err.join("\n")).toContain("no such version");
+  });
+
+  it("approves a candidate id and reports it against the candidate stage's pick", async () => {
+    const c = capture();
+    const d = deps({ candidateWinner: vi.fn(async () => "c1") });
+    expect(await main(["approve", "/r", "c3"], c.io, d)).toBe(0);
+    expect(d.captureApproval).toHaveBeenCalledWith("/r", "c3");
+    expect(d.candidateWinner).toHaveBeenCalledWith("/r");
+    expect(c.out.join("\n")).toContain("differs from (c1)");
+    expect(c.out.join("\n")).toContain("committee's candidate pick");
+    expect(d.committeePick).not.toHaveBeenCalled();
+  });
+
+  it("says a candidate agrees when it matches the candidate stage's own pick", async () => {
+    const c = capture();
+    const d = deps({ candidateWinner: vi.fn(async () => "c1") });
+    await main(["approve", "/r", "c1"], c.io, d);
+    expect(c.out.join("\n")).toContain("agrees with");
+  });
+
+  it("falls back to the committee's version pick for a candidate approval when the run predates the candidate stage", async () => {
+    const c = capture();
+    const d = deps({ candidateWinner: vi.fn(async () => undefined), committeePick: vi.fn(async () => "v01") });
+    await main(["approve", "/r", "c0"], c.io, d);
+    expect(c.out.join("\n")).toContain("differs from (v01)");
+  });
+
+  it("rejects an id that is neither a version nor a candidate, as a usage error", async () => {
+    const c = capture();
+    expect(await main(["approve", "/r", "banana"], c.io, deps())).toBe(2);
+    expect(c.err.join("\n")).toMatch(/vNN or cN/);
   });
 
   it("builds and opens the report", async () => {

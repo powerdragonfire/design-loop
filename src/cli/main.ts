@@ -27,6 +27,8 @@ export interface Deps {
   makeChair(): ChairClient;
   /** The committee's top-ranked version of a finalised run. */
   committeePick(runDir: string): Promise<string>;
+  /** The candidate stage's own pick; undefined for a run finalised before that stage existed. */
+  candidateWinner(runDir: string): Promise<string | undefined>;
   /** Fails, naming what is wrong, before any Stitch quota or model spend. */
   preflight(): Promise<void>;
   openInBrowser(path: string): Promise<void>;
@@ -48,7 +50,7 @@ Commands:
   run <screen> [--date YYYY-MM-DD]   generate and critique a screen until a stopping rule fires
   review <runDir>                    open the report, then ask which version to approve
   report <runDir>                    build the report page and open it
-  approve <runDir> <version>         record your pick for a run
+  approve <runDir> <vNN|cN>          record your pick for a run
   calibrate [--repeats N]            measure the composite's noise floor into config.json
   ab-distiller                       list what the digest loses against the raw HTML
 
@@ -89,6 +91,12 @@ export function defaultDeps(designDir: string, io: Io, progress: Progress = noPr
       const rank = raw === null ? undefined : (JSON.parse(raw) as { committeeRank?: string[] }).committeeRank;
       if (!rank?.[0]) throw new Error(`run not finalised: ${file} has no committee pick`);
       return rank[0];
+    },
+    async candidateWinner(runDir) {
+      const file = join(resolve(runDir), "manifest.json");
+      const raw = await readFile(file, "utf8").catch(() => null);
+      const selection = raw === null ? undefined : (JSON.parse(raw) as { selection?: { winner?: string } | null }).selection;
+      return selection?.winner;
     },
     async preflight() {
       const { config } = await loadContract(designDir, {}, undefined, { allowNullSigma: true });
@@ -141,10 +149,18 @@ async function readSpend(runDir: string): Promise<{ usd?: number; stitchGenerati
   }
 }
 
-async function approve(d: Deps, io: Io, runDir: string, version: string, known?: string): Promise<void> {
-  await d.captureApproval(runDir, version);
+async function approve(d: Deps, io: Io, runDir: string, id: string, known?: string): Promise<void> {
+  await d.captureApproval(runDir, id);
+  if (CANDIDATE_ID.test(id)) {
+    // manifest.committeeRank[0] is a VERSION id; comparing a candidate against it would always read
+    // "differs", so a candidate is judged against the candidate stage's own pick instead. A run
+    // finalised before that stage existed has no selection.winner, so it falls back to today's read.
+    const winner = (await d.candidateWinner(runDir)) ?? (await d.committeePick(runDir));
+    io.out(`Approved ${id}: ${id === winner ? "agrees with" : `differs from (${winner})`} the committee's candidate pick.`);
+    return;
+  }
   const pick = known ?? (await d.committeePick(runDir));
-  io.out(`Approved ${version}: ${version === pick ? "agrees with" : `differs from (${pick})`} the committee's pick.`);
+  io.out(`Approved ${id}: ${id === pick ? "agrees with" : `differs from (${pick})`} the committee's pick.`);
 }
 
 async function runCommand(d: Deps, io: Io, progress: Progress, designDir: string, screen: string, date: string): Promise<number> {
@@ -209,6 +225,9 @@ async function reviewCommand(d: Deps, io: Io, runDir: string): Promise<number> {
 }
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+// A run's approvable things are its versions and, since the candidate stage, its candidates.
+const APPROVABLE = /^(v\d+|c\d+)$/;
+const CANDIDATE_ID = /^c\d+$/;
 
 export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}): Promise<number> {
   let progress: Progress = noProgress;
@@ -263,10 +282,13 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
         await d.openInBrowser(report);
         return 0;
       }
-      case "approve":
-        need(2, "two arguments: <runDir> <version>");
-        await approve(d, io, args[0]!, args[1]!);
+      case "approve": {
+        need(2, "two arguments: <runDir> <vNN|cN>");
+        const id = args[1]!;
+        if (!APPROVABLE.test(id)) throw new UsageError(`not a version or candidate id: ${id} (expected vNN or cN)`);
+        await approve(d, io, args[0]!, id);
         return 0;
+      }
       case "review":
         need(1, "one argument: <runDir>");
         return await reviewCommand(d, io, args[0]!);

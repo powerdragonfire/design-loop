@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { openExistingRun, writeAtomic } from "../store/store.js";
+import { openExistingRun, writeAtomic, type CandidateSummary } from "../store/store.js";
 import type { Critique, Issue } from "../types.js";
 
 /** What the page needs of `manifest.json`; every field is optional because a run may not be finalised. */
@@ -17,6 +17,9 @@ interface ManifestView {
   sigma?: number;
   humanPick?: string;
   agreedWithTop?: boolean;
+  /** Absent for a run finalised before the candidate stage existed; a report from one shows no gallery. */
+  candidates?: CandidateSummary[];
+  selection?: { winner: string; rows: CandidateSummary[] } | null;
 }
 
 /** `vNN/changes.json`: what the chair asked the edit that produced this version to change. */
@@ -109,6 +112,9 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem;margin:0}d
 .versions{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:16px;align-items:start}
 .version{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;min-width:0}
 .version.approved{border:2px solid var(--good)}
+.candidate-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px;margin-top:.5rem}
+.candidate{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:0}
+.candidate.winner{border:2px solid var(--good)}
 .head{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-bottom:.5rem}
 img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:6px}
 .badge,.tag,.sev,.chip{display:inline-block;font-size:.75rem;font-weight:600;padding:.05rem .5rem;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
@@ -213,6 +219,64 @@ ${issues ? `<ul class="issues">${issues}</ul>` : `<p class="muted">None open.</p
 </section>`;
 }
 
+/** The candidate directory survives its own promotion (`promoteCandidate` copies, never moves), so every row's screenshot is still on disk. */
+async function readCandidatePng(runDir: string, id: string): Promise<string | null> {
+  try {
+    return (await readFile(join(runDir, "candidates", id, "screen.png"))).toString("base64");
+  } catch (err) {
+    if (isMissing(err)) return null;
+    throw err;
+  }
+}
+
+function candidateCell(c: CandidateSummary, isWinner: boolean, png: string | null): string {
+  const gate = c.failed
+    ? `<p class="gate fail">Committee unavailable: ${esc(c.failed)}</p>`
+    : c.gatePass
+      ? `<p class="gate ok">Gate: passed</p>`
+      : `<p class="gate fail">Gate: not passed</p>`;
+  return `<div class="candidate${isWinner ? " winner" : ""}" data-candidate="${esc(c.id)}">
+<div class="head"><h3>${esc(c.id)}</h3><span class="chip">family ${esc(c.family)}</span>${isWinner ? `<span class="badge pick">Winner</span>` : ""}</div>
+${png ? `<img src="data:image/png;base64,${png}" alt="Screenshot of candidate ${esc(c.id)}">` : `<p class="muted">Screenshot unavailable</p>`}
+<p><span class="score">${num(c.composite)}</span><span class="delta">${c.blockers} blocker${c.blockers === 1 ? "" : "s"}</span></p>
+${gate}
+</div>`;
+}
+
+/**
+ * One cell per candidate, above the version timeline, so a reader sees the whole fan-out the loop was
+ * seeded from — not only the version it produced. Renders nothing for a run with no candidate stage
+ * (an older manifest with no `candidates`), so those reports are byte-for-byte what they always were.
+ */
+async function candidateGallery(m: ManifestView, runDir: string): Promise<string> {
+  const candidates = m.candidates ?? [];
+  if (candidates.length === 0) return "";
+  const winnerId = m.selection?.winner;
+  const pngs = await Promise.all(candidates.map((c) => readCandidatePng(runDir, c.id)));
+  const cells = candidates.map((c, i) => candidateCell(c, c.id === winnerId, pngs[i]!)).join("\n");
+  // The selection rule (candidates.ts's pickWinner) is: highest composite, except everything within one
+  // sigma of the leader ties and the fewest blockers wins. When the winner IS the top composite this is
+  // invisible and needs no explanation; only a genuine tie-break needs a sentence naming why.
+  const scored = candidates.filter((c) => c.failed === undefined);
+  const leader = scored.length > 0 ? Math.max(...scored.map((c) => c.composite)) : null;
+  const winner = winnerId !== undefined ? candidates.find((c) => c.id === winnerId) : undefined;
+  const leaderRow = leader !== null ? scored.find((c) => c.composite === leader) : undefined;
+  const reason =
+    winner && leaderRow && winner.id !== leaderRow.id && winner.composite < leader!
+      ? `<p class="muted">${esc(winner.id)} was chosen over ${esc(leaderRow.id)}'s higher composite `
+        + `(${num(leaderRow.composite)} vs ${num(winner.composite)}) because both are within one sigma`
+        + `${m.sigma !== undefined ? ` (σ = ${esc(m.sigma)})` : ""} of the leader, and ${esc(winner.id)} `
+        + `has fewer blockers (${winner.blockers} vs ${leaderRow.blockers}).</p>`
+      : "";
+  return `<section class="panel candidates" data-gallery="candidates">
+<h2>${candidates.length} candidate${candidates.length === 1 ? "" : "s"}</h2>
+${reason}
+<div class="candidate-grid">
+${cells}
+</div>
+</section>`;
+}
+
 function header(m: ManifestView | null, names: string[], runDir: string): string {
   const title = `<h1>${esc(m?.screen ?? basename(runDir))}${m?.date ? ` <span class="muted">${esc(m.date)}</span>` : ""}</h1>`;
   if (!m) {
@@ -269,6 +333,7 @@ export async function buildReport(runDir: string): Promise<string> {
 
   const incomplete = skipped.length === 0 ? "" : `<div class="warn" role="alert"><strong>Incomplete version skipped.</strong> `
     + `These directories hold no complete version and are not shown:<ul>${skipped.map((p) => `<li><code>${esc(p)}</code></li>`).join("")}</ul></div>`;
+  const gallery = manifest ? await candidateGallery(manifest, abs) : "";
   const sections = versions.map((v, i) => {
     const prev = versions[i - 1] ?? null;
     const parent = v.parent ? (versions.find((p) => p.name === v.parent) ?? null) : prev;
@@ -284,6 +349,7 @@ export async function buildReport(runDir: string): Promise<string> {
 <body><main>
 ${header(manifest, versions.map((v) => v.name), abs)}
 ${incomplete}
+${gallery}
 <div class="versions">
 ${sections.join("\n")}
 </div>

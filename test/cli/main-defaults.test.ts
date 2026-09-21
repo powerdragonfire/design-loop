@@ -47,6 +47,15 @@ describe("production defaults", () => {
     expect(await d.committeePick(dir)).toBe("v02");
   });
 
+  it("candidateWinner reads selection.winner, and is undefined for a run predating the candidate stage", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dl-main-"));
+    const d = defaultDeps("design", io);
+    await writeFile(join(dir, "manifest.json"), JSON.stringify({ committeeRank: ["v00"] }));
+    expect(await d.candidateWinner(dir)).toBeUndefined();
+    await writeFile(join(dir, "manifest.json"), JSON.stringify({ committeeRank: ["v00"], selection: { winner: "c1", rows: [] } }));
+    expect(await d.candidateWinner(dir)).toBe("c1");
+  });
+
   it("makeGenerator turns a Stitch retry into a warning that names what is retried and when", () => {
     const warnings: string[] = [];
     const progress = { warn: (l: string) => warnings.push(l) } as any;

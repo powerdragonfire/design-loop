@@ -34,6 +34,25 @@ const seed = async (o: { v0?: Over; v1?: Over; fin?: Record<string, unknown> } =
 const page = async (run: { dir: string }) => readFileSync(await buildReport(run.dir), "utf8");
 const section = (h: string, ver: string) => h.split(`data-version="${ver}"`)[1]?.split("<section")[0] ?? "";
 
+type CandRow = { id: string; family: number; composite: number; blockers?: number; gatePass?: boolean };
+const candidateInput = (r: CandRow) => ({
+  id: r.id, family: r.family, png: Buffer.from(`png-${r.id}`), html: "<p>c</p>",
+  doc: { viewport: { w: 393, h: 852 }, nodes: [] },
+  critiques: [crit(r.composite)], composite: r.composite, gatePass: r.gatePass ?? true,
+  openIssues: [], prompt: `PROMPT-${r.id}`,
+});
+const summary = (r: CandRow) => ({ id: r.id, family: r.family, composite: r.composite, blockers: r.blockers ?? 0, gatePass: r.gatePass ?? true });
+/** Writes every candidate, records the selection, promotes the winner to v00, and finalises — the shape `run.ts` leaves behind. */
+const seedWithCandidates = async (rows: CandRow[], winner: string) => {
+  const run = await openRun(dir, "home", "2026-09-18");
+  for (const r of rows) await run.writeCandidate(candidateInput(r));
+  const summaries = rows.map(summary);
+  await run.writeSelection({ winner, rows: summaries });
+  await run.promoteCandidate(winner);
+  await run.finalise(fin({ committeeRank: ["v00"], candidates: summaries, selection: { winner, rows: summaries } }));
+  return run;
+};
+
 describe("buildReport", () => {
   it("shows every version, including the lower-scoring one", async () => {
     const h = await page(await seed());
@@ -165,6 +184,32 @@ describe("buildReport", () => {
     const run = await openRun(dir, "home", "2026-09-18");
     await run.writeVersion(v(0, 70));
     expect(await page(run)).toMatch(/not finalised/i);
+  });
+});
+
+describe("candidate gallery", () => {
+  it("renders a candidate gallery above the versions and marks the winner", async () => {
+    const rows: CandRow[] = [
+      { id: "c0", family: 0, composite: 70 }, { id: "c1", family: 0, composite: 72 },
+      { id: "c2", family: 1, composite: 68 }, { id: "c3", family: 1, composite: 90 },
+      { id: "c4", family: 1, composite: 65 }, { id: "c5", family: 0, composite: 60 },
+    ];
+    const h = await page(await seedWithCandidates(rows, "c3"));
+    expect(h).toContain("6 candidates");
+    expect(h.indexOf('<div class="versions">')).toBeGreaterThan(h.indexOf('data-gallery="candidates"'));
+    expect(h).toMatch(/c3[\s\S]{0,200}winner/i);
+  });
+
+  it("says why the winner won when it was not the highest composite", async () => {
+    // sigma 3 (fin()'s default): leader c0 at 90, c1 at 89 is within it and ties; c1 has fewer blockers.
+    const rows: CandRow[] = [{ id: "c0", family: 0, composite: 90, blockers: 2 }, { id: "c1", family: 0, composite: 89, blockers: 0 }];
+    const h = await page(await seedWithCandidates(rows, "c1"));
+    expect(h).toMatch(/within .* of the leader/i);
+  });
+
+  it("omits the gallery entirely for a run that had no candidate stage", async () => {
+    const h = await page(await seed());
+    expect(h).not.toContain('data-gallery="candidates"');
   });
 });
 

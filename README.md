@@ -27,9 +27,12 @@ design/
   tokens.json          your design tokens: W3C DTCG ($value) or bare leaves both work
   brief.md             the product brief every critic is given
   screens/<name>.md    one spec per screen; `run <name>` needs screens/<name>.md
+  directions.md        optional: one `## ` heading per art direction, fanned out into a candidate family each
   reference/           three real Stitch outputs, <name>.html beside <name>.png, for calibrate
   .design-loop/        written by the tool: quota.json, calibration.json
-  runs/<date>-<screen>/  one directory per run: vNN/ per version, manifest.json, report.html
+  runs/<date>-<screen>/  one directory per run:
+    candidates/<id>/      every candidate stage row (screenshot, HTML, critiques), plus selection.json
+    vNN/                  one directory per version, manifest.json, report.html
 ```
 
 ## Commands, in the order you run them
@@ -39,10 +42,10 @@ design/
 | `smoke` | Calls every live service once — a critic call, the same call again to prove the prompt cache hits, a chair call, a Stitch generate AND edit, then `measure()` on the real Stitch page — and prints PASS/FAIL/SKIP per step. Run it first. | 2 Stitch generations, ~$0.30 |
 | `calibrate [--repeats N]` | Scores each `reference/` screen N times and writes the composite's noise floor into `config.json` as `sigma`, plus `.design-loop/calibration.json`. Re-run it after changing the critic model or the weights. | ~$2.20 at 5 repeats |
 | `ab-distiller` | Critiques each reference screen twice, once from the digest and once from raw HTML, and lists the claims only the raw HTML produced. Whatever it lists is a field `measure`'s `STYLE_PROPS` is missing. | ~$8 |
-| `run <screen> [--date YYYY-MM-DD]` | The loop itself. Shows each step live, then prints the stop reason, the versions, the spend and the report path. | ~$0.58 per screen, see the caveat below |
+| `run <screen> [--date YYYY-MM-DD]` | Generates `families × (1 + variantsPerFamily)` candidates (config's `candidates` section), scores and selects one, promotes it to `v00`, then the edit loop. Shows each step live, then prints the stop reason, the versions, the spend and the report path. | ~$2.30 per screen at the 2×3 default, see the caveat below |
 | `review <runDir>` | Builds the report, opens it, and asks which version to approve. | free |
 | `report <runDir>` | Builds the report page and opens it, approving nothing. | free |
-| `approve <runDir> <version>` | Records your pick in the manifest and in `vNN/approved.json`. | free |
+| `approve <runDir> <vNN\|cN>` | Records your pick — a version or a candidate — in the manifest and in `vNN/approved.json` or `candidates/<id>/approved.json`. | free |
 
 `smoke`, `calibrate`, `ab-distiller` and `run` need credentials; the rest read the run directory only.
 
@@ -79,6 +82,10 @@ critic claude-sonnet-5 · chair claude-opus-5 · sigma 1.8 · up to 5 edits
 
 - The header gives the stop reason (`pass`, `converged`, `budget` or `aborted`), the noise floor sigma the
   stopping rule used, the spend, the committee's pick and your approval.
+- A gallery above the versions shows every candidate the run was seeded from, each with its screenshot,
+  family, composite, blocker count and gate result, and marks the winner. When the winner was not the
+  highest-composite candidate, a line names why (the tie-break rule: everything within one sigma of the
+  leader ties, and the fewest blockers wins). Absent entirely for a run from before the candidate stage.
 - Each version shows its screenshot, its composite score and the delta against the previous round, whether
   the gate passed and why not, the per-critic scores, the prompt that produced it and which issues that edit
   was asked to fix.
@@ -114,9 +121,10 @@ than `~/Projects/design-loop`, set `DESIGN_LOOP_HOME`.
 - **`batchMode: true` is rejected at load.** Batch critiquing is not implemented.
 - **Stitch's free tier is counted as one pool of 550.** It is really 350 Flash plus 200 Pro; this tool keeps
   one counter and warns at 80%. Edits count as generations.
-- **The $0.58 per screen is likely to be optimistic on real pages.** A real Stitch screen has far more nodes
-  than the fixtures, and the digest is sent to four critics each round. `smoke` prints the projected cost
-  from the digest it actually measured — trust that number, and re-baseline from what `calibrate` cost.
+- **The ~$2.30 per screen (six generations at the 2×3 default, plus edits) is likely to be optimistic on real
+  pages.** A real Stitch screen has far more nodes than the fixtures, and the digest is sent to four critics
+  every candidate and every round. `smoke` prints the projected cost from the digest it actually measured —
+  trust that number, and re-baseline from what `calibrate` cost.
 - **Aliases in `tokens.json` are skipped, not resolved.** A leaf like `"{base.radius}"` leaves that category
   unchecked for the value rather than being treated as a literal.
 - **A critic must cite a selector that exists.** Issues citing anything else are dropped and counted as the

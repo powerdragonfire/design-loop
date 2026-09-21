@@ -323,6 +323,23 @@ describe("runScreen", () => {
     expect(gen.prompts).toHaveLength(0);
   });
 
+  // The loop claims vNN and writes everything a critic reads BEFORE the committee runs. In agent mode those
+  // files are the critics' only input; here they also make the round replayable, and `screen-id.txt` is what
+  // lets a later process rebuild the Stitch handle instead of regenerating the screen.
+  it("writes the screen id and the committee's inputs into the version directory", async () => {
+    const dir = setup(); const gen = new FakeGenerator([shot(30, "p", "#123456"), shot(48)]);
+    await run(dir, gen, llmOf([70, 80]).llm, chairOf().client);
+    const base = join(runDir(dir), "v00");
+    expect(readFileSync(join(base, "screen-id.txt"), "utf8")).toBe("fake-0");
+    expect(readFileSync(join(runDir(dir), "v01", "screen-id.txt"), "utf8")).toBe("fake-1");
+    expect(readFileSync(join(base, "digest.txt"), "utf8")).toContain("#b1");
+    expect(readJson(join(base, "carried-issues.json"))).toEqual([]);
+    // The same facts the accessibility critic is sent: measured findings, not the token-drift dimension.
+    const written = readJson(join(base, "measurements.json")).map((i: Issue) => i.id);
+    expect(written.some((id: string) => id.startsWith("det-tap-"))).toBe(true);
+    expect(written.some((id: string) => id.startsWith("det-token-"))).toBe(false);
+  });
+
   it("gives the accessibility critic the measurements, without token drift", async () => {
     const dir = setup(); const { llm, seen } = llmOf([90]);
     await run(dir, new FakeGenerator(Array(6).fill(shot(30, "p", "#123456"))), llm, chairOf().client);

@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { main, type Deps } from "../../src/cli/main.js";
 import { recordProgress } from "../helpers/recordProgress.js";
 
@@ -128,6 +131,68 @@ describe("main", () => {
     expect(await main(["run", "home"], c.io, d)).toBe(1);
     expect(c.err.join("\n")).toContain("Stitch quota too low");
     expect(c.err.join("\n")).not.toMatch(/\n\s+at /);
+  });
+
+  // A design folder in each mode. `run` must take the old path in "api" and the step path in "agent".
+  const designIn = (criticMode: "api" | "agent") => {
+    const dir = mkdtempSync(join(tmpdir(), "dl-mode-"));
+    cpSync(new URL("../fixtures/design/", import.meta.url).pathname, dir, {
+      recursive: true, filter: (src) => !src.includes(".design-loop"),
+    });
+    const cfg = join(dir, "config.json");
+    writeFileSync(cfg, JSON.stringify({ ...JSON.parse(readFileSync(cfg, "utf8")), criticMode }));
+    return dir;
+  };
+
+  it("runs a screen through runScreen in api mode, never through a step", async () => {
+    const d = deps({ stepRun: vi.fn() });
+    expect(await main(["--design", designIn("api"), "run", "home"], capture().io, d)).toBe(0);
+    expect(d.runScreen).toHaveBeenCalled();
+    expect(d.stepRun).not.toHaveBeenCalled();
+  });
+
+  it("suspends `run` into the first step in agent mode, without an Anthropic preflight", async () => {
+    const c = capture();
+    const designDir = designIn("agent");
+    const d = deps({
+      stepRun: vi.fn(async () => ({ done: false as const, workOrder: "/r/v00/work-order.json", runDir: "/r" })),
+    });
+    expect(await main(["--design", designDir, "run", "--date", "2026-09-20", "home"], c.io, d)).toBe(10);
+    expect(d.runScreen).not.toHaveBeenCalled();
+    expect(d.stepRun).toHaveBeenCalledWith(expect.objectContaining({ designDir, screen: "home", date: "2026-09-20", runDir: undefined }));
+    // The preflight authenticates a key an agent-mode run never uses; failing on it would block the mode.
+    expect(d.preflight).not.toHaveBeenCalled();
+    expect(c.out.join("\n")).toContain("/r/v00/work-order.json");
+  });
+
+  it("exits 2 when `step` has no run directory", async () => {
+    expect(await main(["step"], capture().io, deps())).toBe(2);
+    expect(await main(["step", "/r", "extra"], capture().io, deps())).toBe(2);
+  });
+
+  it("exits 10 with the work order and the command to run next when a step suspends", async () => {
+    const c = capture();
+    const d = deps({
+      runIdentity: vi.fn(async () => ({ screen: "home", date: "2026-09-20" })),
+      stepRun: vi.fn(async () => ({ done: false as const, workOrder: "/r/v00/work-order.json", runDir: "/r" })),
+    });
+    expect(await main(["step", "/r"], c.io, d)).toBe(10);
+    expect(d.stepRun).toHaveBeenCalledWith(expect.objectContaining({ runDir: "/r", screen: "home", date: "2026-09-20" }));
+    const text = c.out.join("\n");
+    expect(text).toContain("/r/v00/work-order.json");
+    expect(text).toContain("design-loop step /r");
+    expect(d.buildReport).not.toHaveBeenCalled();
+  });
+
+  it("exits 0 and reports when the stepped run has finished", async () => {
+    const c = capture();
+    const d = deps({
+      runIdentity: vi.fn(async () => ({ screen: "home", date: "2026-09-20" })),
+      stepRun: vi.fn(async () => ({ done: true as const, result: RESULT, runDir: RESULT.runDir })),
+    });
+    expect(await main(["step", RESULT.runDir], c.io, d)).toBe(0);
+    expect(c.out.join("\n")).toContain("pass");
+    expect(d.buildReport).toHaveBeenCalledWith(RESULT.runDir);
   });
 
   it("approves a version and says whether it agreed with the committee", async () => {

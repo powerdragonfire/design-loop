@@ -7,11 +7,12 @@ import { composite, gate, openIssues, renormalise } from "../scoring/score.js";
 import { decide, type RoundRecord, type StopReason } from "../scoring/stop.js";
 import { distill } from "../distill/distill.js";
 import { runCommittee, type LlmClient } from "../critics/llm.js";
+import { WorkOrderPending } from "../critics/agent.js";
 import { chair, type ChairClient } from "../chair/chair.js";
 import { selectCandidate, type CandidateRow } from "./candidates.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
 import { MONTHLY_LIMIT, readQuota } from "../stitch/quota.js";
-import { openRun, versionName, type CandidateSummary, type Degradation } from "../store/store.js";
+import { openRun, versionName, type CandidateSummary, type Degradation, type Run } from "../store/store.js";
 import { readCalibration, type Calibration } from "./calibration.js";
 import { costUsd } from "./pricing.js";
 import { groupTokenIssues } from "./group.js";
@@ -32,6 +33,11 @@ export interface RunOptions {
   progress?: Progress;
   /** Replaced by the resume layer so a replayed round reads its stored doc instead of re-rendering the page. */
   measure?: (html: string) => Promise<MeasuredDoc>;
+  /**
+   * The run to write into, when the caller has already opened one. `dl step` resumes a run directory an
+   * earlier process claimed, so it must hand over that directory rather than let this one claim a new `-2`.
+   */
+  run?: Run;
 }
 
 export interface RunResult {
@@ -96,7 +102,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   // A stale calibration is the quiet failure: sigma decides when the run stops, so a run judged against
   // a noise floor measured for another model, other weights or another number says so, loudly (spec §16).
   const calibration = await readCalibration(designDir, cfg, sigma, log);
-  const run = await openRun(designDir, screen, date);
+  const run = opts.run ?? (await openRun(designDir, screen, date));
   progress.header([
     `run ${screen} · design ${designDir}`,
     `critic ${cfg.models.critic} (${cfg.criticMode}) · chair ${cfg.models.chair} · sigma ${sigma} · up to ${cfg.maxRounds} edits`,
@@ -215,7 +221,10 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       let next;
       try {
         next = await chairPhase();
-      } catch {
+      } catch (err) {
+        // A chair that has not answered yet has not failed. Retrying would re-read the same absent file, and
+        // "chair failed, retrying once" would tell the operator a suspension was an outage.
+        if (err instanceof WorkOrderPending) throw err;
         progress.warn("chair failed, retrying once");
         next = await chairPhase();
       }
@@ -254,25 +263,34 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       const doc = await progress.phase("measure", () => measureDoc(html), (d) => `${d.nodes.length} nodes`);
       const det = deterministicCritique(doc, contract.tokens);
       const digest = distill(doc);
+      // Token drift is the deterministic critique's own dimension and is not a measurement, so it is filtered
+      // out here rather than at each use: an agent critic reads `measurements.json` instead of being sent this
+      // list, and the two must hold the same facts or the modes are not the same review.
+      const measurements = det.critique.issues.filter((i) => !i.id.startsWith("det-token-"));
+
+      // The directory is claimed and everything a critic reads is written BEFORE the committee runs. In agent
+      // mode a critic is a separate process reading these files, so a round that suspends must already have
+      // left them behind; in API mode it costs three writes and makes the same round replayable.
+      const slot = await run.openVersion(n);
+      await slot.writeGenerated({ png, html, doc, prompt, screenId: handle.id, parent });
+      await slot.writeCommitteeInputs({ digest, carriedIssues: carried, measurements });
 
       const committee = await progress.phase(
         "critics",
         () =>
           runCommittee(
-            {
-              contract,
-              screen,
-              digest,
-              imagePng: png,
-              openIssues: carried,
-              measurements: det.critique.issues.filter((i) => !i.id.startsWith("det-token-")),
-            },
+            { contract, screen, digest, imagePng: png, openIssues: carried, measurements },
             cfg,
             llm,
             committeeHooks(progress, true),
           ),
         (c) => `${c.critiques.length}/${c.critiques.length + c.failures.length} ok`,
       );
+      // Before ANY read of `committee` — see the CALLING CONTRACT on AgentLlmClient. A critic that has not
+      // answered yet and one whose answer does not parse both reach `runCommittee` as a rejected promise and
+      // are filed identically into `dropped`/`failures`; only the client knows which is which. Read the result
+      // first and a round waiting on all four critics renormalises its weights over nobody and scores itself.
+      (llm as { throwIfPending?: () => void }).throwIfPending?.();
       const criticTokens = llm.takeUsage?.();
       addUsage(criticUsage, criticTokens);
       if (criticTokens) progress.debug(`  critics tokens: ${criticTokens.inputTokens} in, ${criticTokens.outputTokens} out, ${criticTokens.cachedTokens} cached`);
@@ -294,9 +312,8 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       const open = openIssues(scored, carried);
       const verdict = gate(scored, det.measurementsPass, carried);
 
-      const written = await run.writeVersion({
-        index: n, png, html, doc, critiques: scored, composite: score, gatePass: verdict.pass, prompt, openIssues: open, parent, changes,
-      });
+      await slot.finish({ critiques: scored, composite: score, gatePass: verdict.pass, openIssues: open, changes });
+      const written = slot.version;
       rounds.push({ version: written, composite: score, gatePass: verdict.pass });
       records.set(written, { png, doc, critiques: scored, open, composite: score, prompt, handle });
       log?.(`${written}: composite ${score.toFixed(1)}, ${open.length} open, gate ${verdict.pass ? "pass" : "fail"}`);
@@ -312,6 +329,11 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   try {
     ({ stop: stopReason, best: stoppedBest } = await loop());
   } catch (err) {
+    // A work order is a suspension, not an abort: the run has more to do and a later step will do it. Writing
+    // a manifest here would finalise it, and a finalised run refuses every later write — the resumed step
+    // could never score the round it is waiting for. This must come before the `rounds.length` test: from
+    // round 1 on there ARE rounds, so a suspension would otherwise be recorded as an aborted run.
+    if (err instanceof WorkOrderPending) throw err;
     // With no version written there is nothing to keep, so the failure is the caller's to see.
     if (rounds.length === 0) throw err;
     stopReason = "aborted";

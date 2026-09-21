@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Generator, Screen } from "../stitch/adapter.js";
 import { versionName, type Run, type RoundCursor, type VersionHandle } from "../store/store.js";
@@ -141,6 +141,16 @@ export function resumingRun(run: Run, runDir: string): Run {
   const done = async (index: number): Promise<boolean> =>
     (await readOptional(join(runDir, versionName(index), "composite.json"))) !== null;
 
+  /** Claimed by somebody: a directory is here. Says nothing about whether it was scored — `done` does that. */
+  const claimed = async (index: number): Promise<boolean> =>
+    stat(join(runDir, versionName(index))).then(
+      (s) => s.isDirectory(),
+      (err: NodeJS.ErrnoException) => {
+        if (missing(err) || err.code === "ENOTDIR") return false;
+        throw err;
+      },
+    );
+
   /**
    * Names the directory that is already there and writes nothing. Because a replayed round never reaches a real
    * `finish`, it can never append a second row for this version to the run's `versions` list — which is
@@ -149,7 +159,7 @@ export function resumingRun(run: Run, runDir: string): Run {
    * What makes that airtight rather than merely true today is the store's own claim: `openVersion` takes `vNN`
    * with a NON-RECURSIVE `mkdir` and turns EEXIST into an error, so two real handles for one index are
    * impossible whatever the list holds. This branch short-circuits before that `mkdir` for a scored version;
-   * an unscored one still hits it and is refused.
+   * an unscored one goes to `reopenVersion`, which makes its own, narrower demand of the directory.
    */
   const replayed = (index: number): VersionHandle => ({
     version: versionName(index),
@@ -168,6 +178,13 @@ export function resumingRun(run: Run, runDir: string): Run {
     },
     async openVersion(index) {
       if (await done(index)) return replayed(index);
+      // A directory that exists but holds no `composite.json` is the suspend state itself: an earlier process
+      // claimed it, wrote everything the critics read and stopped to wait for their answers. Its round is
+      // re-scored rather than replayed — the generator and measure layers key per artefact and already hand
+      // this round back for free, and the score is exactly what is still missing — so the directory only has
+      // to be adopted. `openVersion` would refuse it, by design: its claim is what keeps two live handles for
+      // one index impossible, so the re-entry says what it means with a different name instead.
+      if (await claimed(index)) return run.reopenVersion(index);
       return run.openVersion(index);
     },
   };

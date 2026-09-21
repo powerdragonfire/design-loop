@@ -56,6 +56,29 @@ progress while it runs, read the background output; to see what happened after a
 Stop reasons: `pass` (no open blockers or majors), `converged` (two rounds without a real improvement),
 `budget` (hit the round cap), `aborted` (exit 3 — saved versions are kept and still reviewable).
 
+**In `criticMode: "agent"` the run stops after each generation and hands you the work instead.** The
+critics and the chair are subagents you dispatch; `dl run` cannot call them itself, so it suspends:
+
+1. Run `dl run <screen>` (the first step) or `dl step <runDir>` (every step after it).
+2. Exit 0 — the run is finished; go to step 4 below. Exit 10 — read the `work-order.json` it printed.
+3. For each unit in `units`, dispatch a subagent of the type named in `agent`. Give it the unit's
+   `inputs` paths and its `output` path, and nothing else. Dispatch at most `concurrency` at a time.
+   Wait for all of them, then go back to 1.
+
+Paths in a work order are relative to `runDir` (or to `designDir` for `brief.md`, `tokens.json` and
+`screens/`), both of which the file gives as absolute paths. An input with the value `null` is one this
+agent is deliberately not shown — do not go and find it.
+
+A step re-executes the run from round 0 every time. That is free: every screen already generated, every
+page already measured and every round already scored is read back from the run directory, so only the
+part that was waiting on you actually runs.
+
+**Never write, edit or repair an inbox file yourself.** A critique you wrote is a fabricated critique: it
+would be scored, carried into the next round and reported as a specialist's judgement. If an agent fails
+or writes nothing, leave the file absent — `dl step` records it as a dropped critic and renormalises the
+weights over the survivors. This is the same rule as "the user approves, you never do", and it matters for
+the same reason.
+
 ### 4. Show the result
 
 Run `dl report <runDir>`. **Do not use `review`** — it asks a question on stdin and will hang. `report` builds
@@ -81,6 +104,9 @@ you, or the committee's pick, is not approval.
 - Approve, calibrate or run `ab-distiller` (about $8, tuning only) unless the user asked for it.
 - Edit `tokens.json`, `config.json` weights, or a screen spec to make a gate pass. If the gate fails, report why.
 - Retry a failed run in a loop. Every retry spends money and Stitch quota.
+- Write, edit or repair a file under `runs/<run>/vNN/inbox/`. That is an agent's answer, not yours.
+- Re-run `dl step` while subagents are still working: it would write a work order for critics that are
+  about to answer.
 
 ## Exit codes
 
@@ -90,3 +116,4 @@ you, or the committee's pick, is not approval.
 | 1 | bad credentials, exhausted quota, unreadable design folder, failed smoke step | show the message; fix the cause |
 | 2 | command typed wrong | read the printed usage |
 | 3 | run aborted part-way | `report` the run; saved versions are kept |
+| 10 | a work order is waiting (agent mode only) | dispatch the agents it names, then `dl step <runDir>` |

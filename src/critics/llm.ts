@@ -18,8 +18,13 @@ export interface LlmClient {
   takeUsage?(): Usage;
 }
 
-/** The fifth dimension, tokenConformance, is the deterministic critic and is not in this list. */
-const LLM_CRITICS = ["typography", "behavioural", "accessibility", "feasibility"] as const satisfies readonly CriticName[];
+/**
+ * The fifth dimension, tokenConformance, is the deterministic critic and is not in this list.
+ *
+ * Exported as the canonical order: a work order lists the critics it is waiting for in this order rather than
+ * in the order their absent files happened to be noticed, so the same suspension always writes the same file.
+ */
+export const LLM_CRITICS = ["typography", "behavioural", "accessibility", "feasibility"] as const satisfies readonly CriticName[];
 type LlmCriticName = (typeof LLM_CRITICS)[number];
 
 const isLlmCritic = (c: CriticName): c is LlmCriticName => (LLM_CRITICS as readonly string[]).includes(c);

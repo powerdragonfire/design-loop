@@ -12,6 +12,7 @@ import { AnthropicLlmClient, type LlmClient } from "../critics/llm.js";
 import { buildReport, captureApproval } from "../report/report.js";
 import { createStitchGenerator, type Generator } from "../stitch/adapter.js";
 import { abDistiller, calibrate } from "./calibrate.js";
+import { inspectVersion } from "./inspect.js";
 import { createProgress, noProgress, promptLines, type Progress, type ProgressMode } from "./progress.js";
 import { runScreen } from "./run.js";
 import { isSkipped, smoke } from "./smoke.js";
@@ -58,13 +59,16 @@ Commands:
   approve <runDir> <version>         record your pick for a run
   calibrate [--repeats N]            measure the composite's noise floor into config.json
   ab-distiller                       list what the digest loses against the raw HTML
+  inspect <versionDir>               look up measured nodes by --selector or --text
 
 Options:
   --design <dir>                     the design folder (default: design)
   --quiet                            print results only, no progress
   --verbose                          also print token counts per call
   --date YYYY-MM-DD                  the run's date (default: today, UTC)
-  --repeats N                        calibration repeats per screen (default: 5)`;
+  --repeats N                        calibration repeats per screen (default: 5)
+  --selector <css>                   the node to look up, for \`inspect\`
+  --text <substring>                 match nodes by text, for \`inspect\``;
 
 /** A mistake in how the command was typed: exit 2 with the reason and the usage. */
 class UsageError extends Error {}
@@ -283,6 +287,7 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
         options: {
           design: { type: "string" }, date: { type: "string" }, repeats: { type: "string" }, help: { type: "boolean" },
           quiet: { type: "boolean" }, verbose: { type: "boolean" },
+          selector: { type: "string" }, text: { type: "string" },
         },
         allowPositionals: true,
         strict: true,
@@ -297,11 +302,13 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
     const need = (n: number, what: string): void => {
       if (args.length !== n) throw new UsageError(`\`${command}\` takes ${what}`);
     };
-    const only = (option: "date" | "repeats", cmd: string): void => {
+    const only = (option: "date" | "repeats" | "selector" | "text", cmd: string): void => {
       if (values[option] !== undefined && command !== cmd) throw new UsageError(`--${option} only applies to \`${cmd}\``);
     };
     only("date", "run");
     only("repeats", "calibrate");
+    only("selector", "inspect");
+    only("text", "inspect");
 
     if (values.quiet && values.verbose) throw new UsageError("--quiet and --verbose cannot be used together");
     const designDir = values.design ?? "design";
@@ -356,6 +363,14 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
           for (const i of s.rawOnly) io.out(`  [${i.critic}, ${i.severity}] ${i.claim}`);
         }
         io.out(`Cost: ${usd(r.usd)}`);
+        return 0;
+      }
+      case "inspect": {
+        need(1, "one argument: <versionDir>");
+        // stdout, not io.out through progress or a summary line: a subagent parses this as JSON, so nothing
+        // else may share stdout with it.
+        const nodes = await inspectVersion({ versionDir: args[0]!, selector: values.selector, text: values.text });
+        io.out(JSON.stringify(nodes, null, 2));
         return 0;
       }
       default:

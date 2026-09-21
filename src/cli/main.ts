@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -174,18 +175,19 @@ async function approve(d: Deps, io: Io, runDir: string, id: string, known?: stri
 /**
  * Whether this design folder's critics are Claude Code subagents rather than API calls.
  *
- * Read leniently on purpose. A folder that cannot be read at all is not a mode decision, and refusing here
- * would report a missing or invalid `config.json` in the wrong words and from the wrong place. The API path
- * that a failure falls through to opens the very same contract a line later, inside `runScreen`, and fails
- * with the real message — so nothing is swallowed, only deferred to the code that words it properly.
+ * Only ONE failure is tolerated: no `config.json` at all, which is not a mode decision and which the CLI's
+ * own tests hit by driving `run` against the default `design/` folder that does not exist. Every other
+ * contract error — bad JSON, weights that do not sum to 1, an empty `tokens.json`, a missing `brief.md` —
+ * is thrown from here with its own message.
+ *
+ * It must NOT swallow those. A mode selector that fails open sends an agent-mode run down the API path,
+ * where `preflight()` runs first and reports a broken `tokens.json` as a rejected Anthropic key — a key an
+ * agent-mode run has no reason to hold, which is the very dead end the branch below exists to avoid.
  */
 async function isAgentMode(designDir: string): Promise<boolean> {
-  try {
-    const { config } = await loadContract(designDir, {}, undefined, { allowNullSigma: true });
-    return config.criticMode === "agent";
-  } catch {
-    return false;
-  }
+  if (!existsSync(join(designDir, "config.json"))) return false;
+  const { config } = await loadContract(designDir, {}, undefined, { allowNullSigma: true });
+  return config.criticMode === "agent";
 }
 
 /**

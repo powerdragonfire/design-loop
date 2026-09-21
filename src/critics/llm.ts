@@ -16,6 +16,16 @@ export interface CriticInput {
 export interface LlmClient {
   critique(critic: CriticName, input: CriticInput, model: string): Promise<Critique>;
   takeUsage?(): Usage;
+  /**
+   * Raises a work order if any critic has not answered yet, rather than having failed. A client whose
+   * critiques come from disk defines it; one that calls an API does not, so it is optional.
+   *
+   * It is declared here, on the interface the loop holds, so that the one call `runScreen` makes — the
+   * instant `runCommittee` settles and before any read of its result — is checked by the compiler. A
+   * pending critic and a malformed one are indistinguishable in `CommitteeResult`, so a call that silently
+   * became a no-op (a rename, a typo in a cast) would let a round that must suspend score itself instead.
+   */
+  throwIfPending?(): void;
 }
 
 /**

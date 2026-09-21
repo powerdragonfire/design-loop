@@ -364,6 +364,23 @@ describe("runScreen", () => {
     expect(a11y.resolved.verified).toEqual([]);
   });
 
+  // Archived so a replay re-runs the same round without re-paying for it, and so an answer that has already
+  // produced a version cannot be swapped underneath it. Raw, before the cap: the kept three would make a
+  // replay report `requested` as 3 and lose "the chair asked for 4 changes" from the report.
+  it("archives the chair's raw answer, before the cap, into the version it was reacting to", async () => {
+    const dir = setup(); const gen = new FakeGenerator([shot(30), shot(48)]);
+    const four = ["a", "b", "c", "d"].map(id => major(`typography-${id}`));
+    await run(dir, gen, llmOf([70, 80]).llm, chairOf(0, four).client);
+
+    const archived = readJson(join(runDir(dir), "v00", "chair.json"));
+    expect(archived.prompt).toBe("make the button bigger");   // the client's own prompt, not the capped one
+    expect(archived.changeIds).toEqual(four.map(i => i.id));  // all four, not the three that were kept
+    expect(readJson(join(runDir(dir), "v01", "changes.json")).requested).toBe(4);
+    expect(gen.prompts[1]).toContain("Make exactly these 3 changes");
+    // The last round stops without asking a chair, so it archives none.
+    expect(existsSync(join(runDir(dir), "v01", "chair.json"))).toBe(false);
+  });
+
   it("records on each version the chair changes the edit that produced it was asked to make", async () => {
     const dir = setup(); const gen = new FakeGenerator([shot(30), shot(48)]);
     const two = ["a", "b"].map(id => major(`typography-${id}`));

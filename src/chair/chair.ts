@@ -58,7 +58,19 @@ export async function chair(
   input: ChairInput,
   cfg: Config,
   client: ChairClient,
-): Promise<{ prompt: string; changes: Issue[]; buildFrom: string | null; requested: number }> {
+): Promise<{
+  prompt: string;
+  changes: Issue[];
+  buildFrom: string | null;
+  requested: number;
+  /**
+   * What the client actually answered, before ranking and before the cap — the form `writeChair` archives.
+   * Replaying an archived answer has to reproduce this call exactly, and that is only true of the raw list:
+   * archiving the capped one would make a replay report `requested` as the kept count, so the report's "the
+   * chair asked for N changes; the top M were kept" would quietly become "asked for M".
+   */
+  raw: { prompt: string; changeIds: string[] };
+}> {
   const { prompt, changes } = await client.synthesise(input, cfg.models.chair);
   const kept = rank(changes).slice(0, MAX_CHANGES);
   return {
@@ -67,6 +79,9 @@ export async function chair(
     changes: kept,
     buildFrom: input.regression?.bestVersion ?? null,
     requested: changes.length,
+    // Ids, not issues: `synthesise` has already dropped any id that named nothing, so re-resolving these
+    // against the same `openIssues` on a replay yields the identical list.
+    raw: { prompt, changeIds: changes.map((c) => c.id) },
   };
 }
 

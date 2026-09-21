@@ -11,6 +11,7 @@ import { loadContract } from "../contract/load.js";
 import { AnthropicLlmClient, type LlmClient } from "../critics/llm.js";
 import { buildReport, captureApproval } from "../report/report.js";
 import { createStitchGenerator, type Generator } from "../stitch/adapter.js";
+import { syncAgents } from "./agents.js";
 import { abDistiller, calibrate } from "./calibrate.js";
 import { inspectVersion } from "./inspect.js";
 import { createProgress, noProgress, promptLines, type Progress, type ProgressMode } from "./progress.js";
@@ -54,6 +55,7 @@ Commands:
   smoke                              check every live service once, before spending real money
   run <screen> [--date YYYY-MM-DD]   generate and critique a screen until a stopping rule fires
   step <runDir>                      advance an agent-mode run by one round
+  sync-agents                        write .claude/agents/ from the critic rubrics
   review <runDir>                    open the report, then ask which version to approve
   report <runDir>                    build the report page and open it
   approve <runDir> <version>         record your pick for a run
@@ -190,6 +192,9 @@ async function stepCommand(
   const identity = runDir === undefined ? { screen: screen!, date: date! } : await d.runIdentity(runDir);
   const out = await d.stepRun({
     designDir, ...identity, runDir, generator: d.makeGenerator(), log: (line) => io.out(line), progress,
+    // Every real agent-mode run checks its agent files; only `stepRun`'s own unit tests, which construct
+    // this option directly, ever leave it unset.
+    agentsDir: join(process.cwd(), ".claude", "agents"),
   });
   if (!out.done) {
     io.out(`Run: ${out.runDir}`);
@@ -326,6 +331,12 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
       case "step": {
         need(1, "one argument: <runDir>");
         return await stepCommand(d, io, progress, designDir, args[0]!);
+      }
+      case "sync-agents": {
+        need(0, "no arguments");
+        const written = await syncAgents({ outDir: join(process.cwd(), ".claude", "agents") });
+        for (const f of written) io.out(`wrote ${f}`);
+        return 0;
       }
       case "smoke":
         need(0, "no arguments");

@@ -173,4 +173,17 @@ describe("stepRun", () => {
       expect(gen.prompts).toEqual([]);   // both rounds replayed; nothing was regenerated from the new answer
     });
   });
+
+  // A critic running an old rubric scores against a standard nobody chose, and nothing about the run would
+  // say so — so a work order is refused, not just warned about, the moment `agentsDir` names a directory
+  // that is not (or no longer) in sync with the rubrics `dl sync-agents` reads.
+  describe("agent staleness", () => {
+    it("rejects with a sync-agents message when agentsDir has no synced agent files", async () => {
+      const designDir = setup();
+      const agentsDir = mkdtempSync(join(tmpdir(), "dl-agents-empty-"));
+      await expect(
+        stepRun({ designDir, screen: "home", date: DATE, agentsDir, generator: new FakeGenerator([shot(48)]) }),
+      ).rejects.toThrow(/sync-agents/);
+    });
+  });
 });

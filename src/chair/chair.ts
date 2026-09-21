@@ -89,8 +89,9 @@ export async function chair(
 // ---- the Anthropic client ----------------------------------------------------
 
 // Only keywords structured outputs accept: any string or numeric constraint (minLength, minItems, ...)
-// is a 400 (found in Task 8). A blank prompt is rejected by the client instead.
-const CHAIR_SCHEMA = {
+// is a 400 (found in Task 8). A blank prompt is rejected by the client instead. Exported so the agent
+// chair's brief states the same envelope (src/cli/agents.ts).
+export const CHAIR_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "changeIds"],

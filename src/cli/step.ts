@@ -26,7 +26,8 @@ export interface StepOptions {
    * Where `.claude/agents/` lives, so a work order can be checked against it before it is written. Left
    * undefined, no staleness check runs at all — tests that only care about the run loop's own behaviour are
    * not required to keep a synced agents directory on disk just to call `stepRun`. Production always passes
-   * it (`main.ts` defaults to `<cwd>/.claude/agents`), because every real agent-mode run needs the check.
+   * it (`main.ts` defaults to `~/.claude/agents`, see `defaultAgentsDir`), because every real agent-mode run
+   * needs the check.
    */
   agentsDir?: string;
 }

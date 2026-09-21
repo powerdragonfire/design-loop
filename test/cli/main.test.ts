@@ -164,6 +164,21 @@ describe("main", () => {
     expect(c.out.join("\n")).toContain("/r/v00/work-order.json");
   });
 
+  // The mode selector tolerates only a missing config.json. A real contract error must not fail open into
+  // API mode, where the credential check would report a broken tokens.json as a rejected Anthropic key —
+  // a key an agent-mode run has no reason to hold.
+  it("reports a broken agent-mode contract as a contract error, not as bad credentials", async () => {
+    const c = capture();
+    const designDir = designIn("agent");
+    writeFileSync(join(designDir, "tokens.json"), "{}");
+    const d = deps({ stepRun: vi.fn() });
+    expect(await main(["--design", designDir, "run", "home"], c.io, d)).toBe(1);
+    expect(c.err.join("\n")).toContain("tokens.json defines no tokens");
+    expect(d.preflight).not.toHaveBeenCalled();
+    expect(d.runScreen).not.toHaveBeenCalled();
+    expect(d.stepRun).not.toHaveBeenCalled();
+  });
+
   it("exits 2 when `step` has no run directory", async () => {
     expect(await main(["step"], capture().io, deps())).toBe(2);
     expect(await main(["step", "/r", "extra"], capture().io, deps())).toBe(2);

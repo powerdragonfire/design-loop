@@ -152,5 +152,25 @@ describe("stepRun", () => {
       expect(existsSync(join(runDir, "v01", "digest.txt"))).toBe(true);
       expect(existsSync(join(runDir, "manifest.json"))).toBe(false);
     });
+
+    // The window the archive closes: v01 has been generated from v00's chair answer but not yet scored, so a
+    // later step reopens it and rewrites its prompt.txt. Reading the inbox there would let an edited answer
+    // become the recorded rationale for pixels that came from the old one.
+    it("archives the chair's answer, so editing the inbox afterwards cannot rewrite a generated round", async () => {
+      const designDir = setup();
+      const runDir = await openRound(designDir);
+      await step(designDir, runDir);
+      const chairFile = join(runDir, "v00", "inbox", "chair.json");
+      writeFileSync(chairFile, JSON.stringify({ prompt: "make the button bigger", changeIds: ["t-1"] }));
+      await stepRun({ designDir, screen: "home", date: DATE, runDir, generator: new FakeGenerator([shot(48), shot(64)]) });
+      expect(JSON.parse(readFileSync(join(runDir, "v00", "chair.json"), "utf8")).prompt).toBe("make the button bigger");
+      expect(readFileSync(join(runDir, "v01", "prompt.txt"), "utf8")).toBe("make the button bigger");
+
+      writeFileSync(chairFile, JSON.stringify({ prompt: "TAMPERED", changeIds: [] }));
+      const gen = new FakeGenerator([shot(48), shot(64)]);
+      await stepRun({ designDir, screen: "home", date: DATE, runDir, generator: gen });
+      expect(readFileSync(join(runDir, "v01", "prompt.txt"), "utf8")).toBe("make the button bigger");
+      expect(gen.prompts).toEqual([]);   // both rounds replayed; nothing was regenerated from the new answer
+    });
   });
 });

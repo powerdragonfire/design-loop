@@ -74,10 +74,16 @@ page already measured and every round already scored is read back from the run d
 part that was waiting on you actually runs.
 
 **Never write, edit or repair an inbox file yourself.** A critique you wrote is a fabricated critique: it
-would be scored, carried into the next round and reported as a specialist's judgement. If an agent fails
-or writes nothing, leave the file absent — `dl step` records it as a dropped critic and renormalises the
-weights over the survivors. This is the same rule as "the user approves, you never do", and it matters for
-the same reason.
+would be scored, carried into the next round and reported as a specialist's judgement. This is the same
+rule as "the user approves, you never do", and it matters for the same reason.
+
+**When an agent fails, the round waits — it is not dropped.** An absent inbox file means "has not answered
+yet", so the next `dl step` suspends on the same round and the new work order names that same unit again.
+Re-dispatch it; a transient failure clears. But if it keeps failing, `dl step` will keep reissuing it, and
+there is no way to drop a critic from a round except by putting a file in its inbox — which is the one thing
+you must not do. So **stop and tell the user**, saying which critic cannot answer and why. Whether to
+re-dispatch again, abandon the run, or switch the folder to `criticMode: "api"` is their call. Never
+manufacture an answer to get the loop moving.
 
 ### 4. Show the result
 

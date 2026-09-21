@@ -11,7 +11,7 @@ import { WorkOrderPending } from "../critics/agent.js";
 import { chair, type ChairClient } from "../chair/chair.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
 import { MONTHLY_LIMIT, readQuota } from "../stitch/quota.js";
-import { openRun, versionName, type Degradation, type Run } from "../store/store.js";
+import { openRun, versionName, writeChair, type Degradation, type Run } from "../store/store.js";
 import { readCalibration, type Calibration } from "./calibration.js";
 import { costUsd } from "./pricing.js";
 import { groupTokenIssues } from "./group.js";
@@ -179,7 +179,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       // answered yet and one whose answer does not parse both reach `runCommittee` as a rejected promise and
       // are filed identically into `dropped`/`failures`; only the client knows which is which. Read the result
       // first and a round waiting on all four critics renormalises its weights over nobody and scores itself.
-      (llm as { throwIfPending?: () => void }).throwIfPending?.();
+      llm.throwIfPending?.();
       const criticTokens = llm.takeUsage?.();
       addUsage(criticUsage, criticTokens);
       if (criticTokens) progress.debug(`  critics tokens: ${criticTokens.inputTokens} in, ${criticTokens.outputTokens} out, ${criticTokens.cachedTokens} cached`);
@@ -244,6 +244,13 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
         progress.warn("chair failed, retrying once");
         next = await chairPhase();
       }
+      // Archived the moment it is answered, into the version the chair was reacting to, and BEFORE the edit
+      // it produces exists. From here on this round's answer is settled: `AgentChairClient` prefers the
+      // archived copy over `inbox/chair.json`, so a replay cannot pick up an inbox file that changed after
+      // the fact and rewrite the `prompt.txt` and `changes.json` of a version whose pixels are already
+      // pinned by `screen-id.txt`. It archives in API mode too, which is what Task 4 built it for: without
+      // it a resumed run re-pays the Anthropic chair for every round it replays.
+      await writeChair(run.dir, written, next.raw);
       if (next.requested > next.changes.length) {
         log?.(`chair returned ${next.requested} changes; keeping the top ${next.changes.length}`);
       }

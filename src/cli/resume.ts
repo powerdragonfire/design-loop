@@ -20,15 +20,22 @@ export { versionName, type RoundCursor };
 
 const VERSION_DIR = /^v\d{2}$/;
 
-/** The version directories already on disk, in order. A run directory that does not exist yet has none. */
+const missing = (err: NodeJS.ErrnoException): boolean => err.code === "ENOENT";
+
+/**
+ * The version directories already on disk, in order. A run directory that does not exist yet has none — but
+ * any other failure is a real one and is rethrown: reading an EACCES or an ENOTDIR as "nothing on disk" would
+ * silently degrade `resumingMeasure` into re-rendering every page in a browser instead of saying what is wrong.
+ */
 export async function listVersions(runDir: string): Promise<string[]> {
-  const entries = await readdir(runDir, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir(runDir, { withFileTypes: true })
+    .catch((err: NodeJS.ErrnoException) => (missing(err) ? [] : Promise.reject(err)));
   return entries.filter((e) => e.isDirectory() && VERSION_DIR.test(e.name)).map((e) => e.name).sort();
 }
 
 /** null for a file that is simply not there; any other failure is a real one and is not swallowed. */
 const readOptional = async (file: string): Promise<string | null> =>
-  readFile(file, "utf8").catch((err: NodeJS.ErrnoException) => (err.code === "ENOENT" ? null : Promise.reject(err)));
+  readFile(file, "utf8").catch((err: NodeJS.ErrnoException) => (missing(err) ? null : Promise.reject(err)));
 
 /**
  * A generator that returns the screen an earlier process already generated, without a Stitch call and without
@@ -60,11 +67,16 @@ export function resumingGenerator(opts: { runDir: string; inner: Generator; curs
   const acquire = async (live: () => Promise<Screen>): Promise<Screen> => {
     const index = next++;
     cursor.index = index;
-    const storedId = await readOptional(join(runDir, versionName(index), "screen-id.txt"));
+    const stored = await readOptional(join(runDir, versionName(index), "screen-id.txt"));
+    // A blank `screen-id.txt` is not an id. The store writes that file with a plain `writeFile` inside a
+    // `Promise.all`, so a crash mid-write leaves exactly this — the state the layer exists to survive. Taking
+    // "" for an id would let the round REPORT as replayed and serve the stored HTML, and the failure would
+    // surface a round later, against a screen that does not exist, nowhere near its cause.
+    const id = stored?.trim();
     // Without `fromId` there is no way to rebuild an editable handle, so the round has to be generated again.
     // Its HTML then comes from the live handle rather than from disk, since the two are no longer the same screen.
-    if (storedId !== null && inner.fromId) {
-      return wrap(index, inner.fromId(storedId.trim()), true);
+    if (id && inner.fromId) {
+      return wrap(index, inner.fromId(id), true);
     }
     return wrap(index, await live(), false);
   };
@@ -117,6 +129,13 @@ export function resumingMeasure(opts: {
  * opens a handle for every round it replays, and a throw would break each one. A version counts as scored when
  * its `composite.json` exists — the last file `finish` writes is not enough on its own, but `composite.json` is
  * what `openExistingRun` itself treats as the mark of a scored version, so the two agree.
+ *
+ * `run` MUST be an `openExistingRun` over `runDir`, not an `openRun`. A replayed `writeVersion` returns the
+ * version name without registering it — it cannot, the run's `versions` list is private to the store — while
+ * `runScreen` builds `committeeRank` from every name it was returned and `finalise` rejects an entry the run
+ * does not already know. `openExistingRun` rebuilds that list from each `vNN/composite.json`, the same
+ * predicate `done()` uses below, so the two agree; wrap an `openRun` instead and every replayed round dies at
+ * `finalise` with "no such version v00 in committeeRank", at the end of the run, after all the spend.
  */
 export function resumingRun(run: Run, runDir: string): Run {
   const done = async (index: number): Promise<boolean> =>
@@ -125,7 +144,12 @@ export function resumingRun(run: Run, runDir: string): Run {
   /**
    * Names the directory that is already there and writes nothing. Because a replayed round never reaches a real
    * `finish`, it can never append a second row for this version to the run's `versions` list — which is
-   * serialised straight into `manifest.json`.
+   * serialised straight into `manifest.json`, and which `finish` appends to with no once-guard.
+   *
+   * What makes that airtight rather than merely true today is the store's own claim: `openVersion` takes `vNN`
+   * with a NON-RECURSIVE `mkdir` and turns EEXIST into an error, so two real handles for one index are
+   * impossible whatever the list holds. This branch short-circuits before that `mkdir` for a scored version;
+   * an unscored one still hits it and is refused.
    */
   const replayed = (index: number): VersionHandle => ({
     version: versionName(index),

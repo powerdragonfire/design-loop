@@ -13,7 +13,7 @@ import {
 import { runScreen } from "../../src/cli/run.js";
 import { FakeGenerator, StitchGenerator, type Generator, type Screen } from "../../src/stitch/adapter.js";
 import { readQuota } from "../../src/stitch/quota.js";
-import { openRun } from "../../src/store/store.js";
+import { openExistingRun, openRun } from "../../src/store/store.js";
 import type { LlmClient } from "../../src/critics/llm.js";
 import type { ChairClient } from "../../src/chair/chair.js";
 import type { Critique, MeasuredDoc } from "../../src/types.js";
@@ -121,12 +121,30 @@ describe("resumingGenerator", () => {
     expect(gen.fromId).toBeUndefined();
   });
 
+  it("does not mistake a half-written screen-id.txt for a screen id", async () => {
+    const runDir = seed([{ ...shot(0), doc: doc(1), screenId: "fake-0" }]);
+    writeFileSync(join(runDir, "v00", "screen-id.txt"), "  \n"); // the store crashed mid-write
+    const inner = new FakeGenerator([shot(5)]);
+    const cursor: RoundCursor = { index: -1 };
+
+    const screen = await resumingGenerator({ runDir, inner, cursor }).generate("first prompt");
+    // Reported as replayed, it would serve the stored HTML and send the next edit to a screen that never existed.
+    expect(inner.prompts).toEqual(["first prompt"]);
+    expect(await screen.getHtml()).toBe(html(5));
+  });
+
   it("lists the version directories already on disk, ignoring anything else", async () => {
     const runDir = seed([{ ...shot(0), doc: doc(1), screenId: "fake-0" }, { ...shot(1), doc: doc(2), screenId: "fake-1" }]);
     mkdirSync(join(runDir, "notes"));
     writeFileSync(join(runDir, "manifest.json"), "{}");
     expect(await listVersions(runDir)).toEqual(["v00", "v01"]);
     expect(await listVersions(join(runDir, "nope"))).toEqual([]);
+  });
+
+  it("refuses a run directory it cannot read, rather than reporting no versions", async () => {
+    const runDir = seed([{ ...shot(0), doc: doc(1), screenId: "fake-0" }]);
+    // "Nothing on disk" would quietly send every page back through a browser render instead of saying why.
+    await expect(listVersions(join(runDir, "v00", "screen.html"))).rejects.toMatchObject({ code: "ENOTDIR" });
   });
 });
 
@@ -225,6 +243,31 @@ describe("resumingRun", () => {
     });
     const manifest = JSON.parse(readFileSync(join(run.dir, "manifest.json"), "utf8"));
     expect(manifest.versions).toEqual([{ version: "v00", composite: 70, gatePass: false }]);
+  });
+
+  // The path production takes. `scoredRun()` above writes v00 through the very Run it then wraps, so that
+  // Run knows v00 as a side effect of having written it. A resumed run has no such history: it reopens the
+  // directory, and `finalise` validates committeeRank against a list rebuilt from each vNN/composite.json.
+  it("finalises a run it replayed into, when the Run was rebuilt from the directory", async () => {
+    const designDir = mkdtempSync(join(tmpdir(), "dl-reopen-"));
+    const first = await openRun(designDir, "home", "2026-09-20");
+    await first.writeVersion(version(0));
+
+    const resumed = resumingRun(await openExistingRun(first.dir), first.dir);
+    expect(await resumed.writeVersion(version(0))).toBe("v00"); // replayed: returns the name, registers nothing
+    expect(await resumed.writeVersion({ ...version(1), composite: 80, gatePass: true })).toBe("v01");
+    await resumed.finalise({
+      stopReason: "pass", committeeRank: ["v01", "v00"], hallucinationRate: {}, degradations: [], sigma: 3,
+      spend: { stitchGenerations: 2, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0 },
+    });
+
+    const manifest = JSON.parse(readFileSync(join(first.dir, "manifest.json"), "utf8"));
+    expect(manifest.committeeRank).toEqual(["v01", "v00"]);
+    expect(manifest.best).toBe("v01");
+    expect(manifest.versions).toEqual([
+      { version: "v00", composite: 70, gatePass: false },
+      { version: "v01", composite: 80, gatePass: true },
+    ]);
   });
 
   it("claims a real directory for a round that is not on disk yet", async () => {

@@ -239,7 +239,7 @@ describe("resumingRun", () => {
     }
     await resumed.finalise({
       stopReason: "pass", committeeRank: ["v00"], hallucinationRate: {}, degradations: [], sigma: 3,
-      spend: { stitchGenerations: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0 },
+      spend: { stitchGenerations: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0, criticMode: "api" },
     });
     const manifest = JSON.parse(readFileSync(join(run.dir, "manifest.json"), "utf8"));
     expect(manifest.versions).toEqual([{ version: "v00", composite: 70, gatePass: false }]);
@@ -258,7 +258,7 @@ describe("resumingRun", () => {
     expect(await resumed.writeVersion({ ...version(1), composite: 80, gatePass: true })).toBe("v01");
     await resumed.finalise({
       stopReason: "pass", committeeRank: ["v01", "v00"], hallucinationRate: {}, degradations: [], sigma: 3,
-      spend: { stitchGenerations: 2, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0 },
+      spend: { stitchGenerations: 2, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0, criticMode: "api" },
     });
 
     const manifest = JSON.parse(readFileSync(join(first.dir, "manifest.json"), "utf8"));
@@ -288,7 +288,7 @@ describe("resumingRun", () => {
     expect(JSON.parse(readFileSync(join(first.dir, "v00", "composite.json"), "utf8")).composite).toBe(70);
     await resumed.finalise({
       stopReason: "pass", committeeRank: ["v00"], hallucinationRate: {}, degradations: [], sigma: 3,
-      spend: { stitchGenerations: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0 },
+      spend: { stitchGenerations: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, usd: 0, criticMode: "api" },
     });
     expect(JSON.parse(readFileSync(join(first.dir, "manifest.json"), "utf8")).best).toBe("v00");
   });

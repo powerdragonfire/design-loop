@@ -11,7 +11,7 @@ interface ManifestView {
   stopReason?: string;
   abortReason?: string;
   committeeRank?: string[];
-  spend?: { stitchGenerations: number; inputTokens: number; outputTokens: number; cachedTokens: number; usd: number };
+  spend?: { stitchGenerations: number; inputTokens: number; outputTokens: number; cachedTokens: number; usd: number | null };
   hallucinationRate?: Record<string, number>;
   degradations?: { version: string; critic: string; error: string }[];
   sigma?: number;
@@ -307,7 +307,7 @@ function header(m: ManifestView | null, names: string[], runDir: string): string
 <dl>
 <dt>Stop reason</dt><dd><strong>${esc(m.stopReason ?? "unknown")}</strong>${m.abortReason ? ` — ${esc(m.abortReason)}` : ""}</dd>
 <dt>Noise floor</dt><dd>σ = ${esc(m.sigma ?? "unknown")}</dd>
-${spend ? `<dt>Spend</dt><dd>$${spend.usd.toFixed(2)} · ${spend.stitchGenerations} Stitch generations · ${spend.inputTokens} in / ${spend.outputTokens} out / ${spend.cachedTokens} cached tokens</dd>` : ""}
+${spend ? `<dt>Spend</dt><dd>${spend.usd == null ? "not metered (agent mode)" : `$${spend.usd.toFixed(2)}`} · ${spend.stitchGenerations} Stitch generations · ${spend.inputTokens} in / ${spend.outputTokens} out / ${spend.cachedTokens} cached tokens</dd>` : ""}
 <dt>Committee pick</dt><dd>${esc(rank[0] ?? "none")}</dd>
 <dt>Your approval</dt><dd>${approval}</dd>
 ${rates.length > 0 ? `<dt>Hallucinated evidence</dt><dd>${rates.map(([c, r]) => `${esc(c)} ${Math.round(r * 100)}%`).join(" · ")}</dd>` : ""}

@@ -154,8 +154,11 @@ export function defaultDeps(designDir: string, io: Io, progress: Progress = noPr
 
 const usd = (v: number | null): string => (v === null ? "unknown (no price for the model)" : `$${v.toFixed(2)}`);
 
-/** What the run cost, from its manifest; null when the manifest is unreadable, so a report never fails on it. */
-async function readSpend(runDir: string): Promise<{ usd?: number; stitchGenerations?: number } | null> {
+/**
+ * What the run cost, from its manifest; null when the manifest is unreadable, so a report never fails on it.
+ * `usd` is itself `number | null`: null there is agent mode's honest "not measured", never absence of the field.
+ */
+async function readSpend(runDir: string): Promise<{ usd?: number | null; stitchGenerations?: number } | null> {
   try {
     const manifest = JSON.parse(await readFile(join(resolve(runDir), "manifest.json"), "utf8"));
     return manifest.spend ?? null;
@@ -246,7 +249,10 @@ async function runCommand(d: Deps, io: Io, progress: Progress, designDir: string
   const spend = await readSpend(result.runDir);
   io.out(`Stop reason: ${result.stopReason}${result.abortReason ? ` (${result.abortReason})` : ""}`);
   io.out(`Versions: ${result.versions}, best: ${result.best}`);
-  if (spend?.usd !== undefined) io.out(`Spend: $${spend.usd.toFixed(2)}, ${spend.stitchGenerations ?? 0} Stitch generations`);
+  // `!== undefined` would let a `null` usd (agent mode's honest "not measured") through to `.toFixed()` and
+  // crash the summary line the operator most needs to see. Handle it as its own case instead of coercing it.
+  if (spend?.usd != null) io.out(`Spend: $${spend.usd.toFixed(2)}, ${spend.stitchGenerations ?? 0} Stitch generations`);
+  else if (spend) io.out(`Spend: not metered (agent mode), ${spend.stitchGenerations ?? 0} Stitch generations`);
   try {
     io.out(`Report: ${await d.buildReport(result.runDir)}`);
   } catch (err) {

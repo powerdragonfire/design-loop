@@ -15,7 +15,7 @@ const v = (index: number, composite: number, gatePass = false) => ({
   doc: { viewport: { w: 393, h: 852 }, nodes: [] },
   critiques: [], composite, gatePass, prompt: `P${index}`, openIssues: [],
 });
-const spend = { stitchGenerations: 3, inputTokens: 1, outputTokens: 1, cachedTokens: 0, usd: 0.58 };
+const spend = { stitchGenerations: 3, inputTokens: 1, outputTokens: 1, cachedTokens: 0, usd: 0.58, criticMode: "api" as const };
 const fin = (over: Record<string, unknown> = {}) => ({
   stopReason: "converged" as const, committeeRank: ["v00"], spend,
   hallucinationRate: {}, degradations: [], sigma: 3, ...over,

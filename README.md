@@ -23,7 +23,9 @@ Default `design/`, or pass `--design <dir>`. `test/fixtures/design/` is a workin
 
 ```
 design/
-  config.json          sigma, maxRounds, convergence, model names, critic weights (must sum to 1.0)
+  config.json          sigma, maxRounds, convergence, model names, critic weights (must sum to 1.0),
+                       criticMode ("api": this process calls Anthropic directly, or "agent": critiques
+                       and chair verdicts come from Claude Code subagents instead)
   tokens.json          your design tokens: W3C DTCG ($value) or bare leaves both work
   brief.md             the product brief every critic is given
   screens/<name>.md    one spec per screen; `run <name>` needs screens/<name>.md
@@ -42,7 +44,10 @@ design/
 | `smoke` | Calls every live service once — a critic call, the same call again to prove the prompt cache hits, a chair call, a Stitch generate AND edit, then `measure()` on the real Stitch page — and prints PASS/FAIL/SKIP per step. Run it first. | 2 Stitch generations, ~$0.30 |
 | `calibrate [--repeats N]` | Scores each `reference/` screen N times and writes the composite's noise floor into `config.json` as `sigma`, plus `.design-loop/calibration.json`. Re-run it after changing the critic model or the weights. | ~$2.20 at 5 repeats |
 | `ab-distiller` | Critiques each reference screen twice, once from the digest and once from raw HTML, and lists the claims only the raw HTML produced. Whatever it lists is a field `measure`'s `STYLE_PROPS` is missing. | ~$8 |
-| `run <screen> [--date YYYY-MM-DD]` | Generates `families × (1 + variantsPerFamily)` candidates (config's `candidates` section — see [Generating more than one candidate](#generating-more-than-one-candidate); the default, `families: 1, variantsPerFamily: 0`, is one generation, today's behaviour), scores and selects one, promotes it to `v00`, then the edit loop. Shows each step live, then prints the stop reason, the versions, the spend and the report path. | ~$1.06 per screen by default; ~$2.30 with the six-candidate example below, see the caveat there |
+| `sync-agents` | Writes `.claude/agents/design-loop-<critic>.md` and the chair's agent file from the critic rubrics baked into this build. Agent mode only — `run`/`step` refuse to dispatch a subagent against a stale one. Re-run it after upgrading. | free |
+| `run <screen> [--date YYYY-MM-DD]` | Generates `families × (1 + variantsPerFamily)` candidates (config's `candidates` section — see [Generating more than one candidate](#generating-more-than-one-candidate); the default, `families: 1, variantsPerFamily: 0`, is one generation, today's behaviour), scores and selects one, promotes it to `v00`, then the edit loop. In `criticMode: "api"` it runs to completion, showing each step live, then prints the stop reason, the versions, the spend and the report path. In `criticMode: "agent"` it IS the first `step`: it suspends on the first round's critics and exits 10. | ~$1.06 per screen by default; ~$2.30 with the six-candidate example below, see the caveat there; not metered in agent mode |
+| `step <runDir>` | Advances a suspended agent-mode run by one round. Everything already answered on disk is replayed for free; the first thing nobody has answered yet stops the run again and writes a `work-order.json` naming which subagents to dispatch. Keep calling it until it exits 0. | free (the round's own Stitch generation aside) |
+| `inspect <versionDir> [--selector <css> \| --text <substring>]` | Looks up measured nodes from a version's digest by selector or text. The tool an agent-mode critic uses to check a claim against the real page before writing it — not usually run by hand. | free |
 | `review <runDir>` | Builds the report, opens it, and asks which version to approve. | free |
 | `report <runDir>` | Builds the report page and opens it, approving nothing. | free |
 | `approve <runDir> <vNN\|cN>` | Records your pick — a version or a candidate — in the manifest and in `vNN/approved.json` or `candidates/<id>/approved.json`. | free |
@@ -140,6 +145,7 @@ than `~/Projects/design-loop`, set `DESIGN_LOOP_HOME`.
 - `1` — a failure: bad credentials, exhausted quota, an unreadable design folder, a failed smoke step.
 - `2` — the command was typed wrong; the usage text is printed.
 - `3` — the run was aborted part-way. Every version already written is kept and can still be reviewed.
+- `10` — an agent-mode run is waiting: a `work-order.json` names the subagents to dispatch. Run `step` again after they have answered.
 
 ## Known limits in v1
 
@@ -157,3 +163,13 @@ than `~/Projects/design-loop`, set `DESIGN_LOOP_HOME`.
 - **A critic must cite a selector that exists.** Issues citing anything else are dropped and counted as the
   critic's hallucination rate, which the report shows. On pages without ids the selectors are long
   positional paths, so expect a non-zero rate.
+- **Agent mode is not calibrated.** `calibrate` still runs through the API, so an agent-mode run
+  inherits an API-mode sigma and warns loudly about it. Its spend is not metered either: subagent
+  tokens never reach the CLI.
+- **Agent mode cannot drop a critic.** In api mode, a critic that errors or fails validation is dropped
+  from the round and the rest of the committee's weights are renormalised over the survivors. That path
+  is only reachable by a critique that exists on disk and fails validation, and `SKILL.md` will not let
+  Claude write one on a critic's behalf — a critique Claude wrote standing in for a critic that could not
+  produce one would be a fabricated critique, not a degraded round. So in agent mode a critic that cannot
+  answer halts the round instead of being dropped from it, and `step` keeps waiting until the operator
+  decides what to do about it. Api mode is unaffected.

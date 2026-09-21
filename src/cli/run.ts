@@ -84,9 +84,14 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   const cfg = contract.config;
   // One seed per family plus that family's variants, all spent before the edit loop gets a single edit.
   const totalCandidates = cfg.candidates.families * (1 + cfg.candidates.variantsPerFamily);
+  // Agent mode never calls the API for a critique or a chair verdict, so there is no per-token price to
+  // validate — checking one here would reject a model name that is never actually billed.
+  const agentMode = cfg.criticMode === "agent";
   const zero = noUsage();
-  costUsd(cfg.models.critic, zero);
-  costUsd(cfg.models.chair, zero);
+  if (!agentMode) {
+    costUsd(cfg.models.critic, zero);
+    costUsd(cfg.models.chair, zero);
+  }
   const quota = await readQuota(opts.quotaDir ?? designDir);
   const needed = totalCandidates + cfg.maxRounds;
   if (quota.remaining < needed) {
@@ -131,7 +136,13 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       if (tokens) progress.debug(`  chair tokens: ${tokens.inputTokens} in, ${tokens.outputTokens} out, ${tokens.cachedTokens} cached`);
     }
   };
-  const spentSoFar = (): number => costUsd(cfg.models.critic, criticUsage) + costUsd(cfg.models.chair, chairUsage);
+  // Same wording as the report: a live "$0.00 so far" is as much a lie as a finished report printing it,
+  // and agent mode's usage totals never move off zero (the agent clients define no `takeUsage`), so
+  // computing a price for them here would be that lie, not a number worth trusting.
+  const spendStatus = (): string =>
+    agentMode
+      ? "not metered (agent mode)"
+      : `$${(costUsd(cfg.models.critic, criticUsage) + costUsd(cfg.models.chair, chairUsage)).toFixed(2)} so far`;
 
   // Every candidate is generated, measured and critiqued once, here; the winner becomes v00 without ever
   // being measured or critiqued again — that is the whole point of running this stage before the loop.
@@ -258,7 +269,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       const version = versionName(n);
       progress.banner(`${version} · edit ${n} of at most ${cfg.maxRounds}`, {
         fraction: n / cfg.maxRounds,
-        status: `$${spentSoFar().toFixed(2)} so far · ${stitchGenerations} Stitch generation${stitchGenerations === 1 ? "" : "s"}`,
+        status: `${spendStatus()} · ${stitchGenerations} Stitch generation${stitchGenerations === 1 ? "" : "s"}`,
       });
       const handle: Screen = await progress.phase("stitch edit", () => baseHandle.edit(prompt));
       stitchGenerations++;
@@ -362,7 +373,10 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     spend: {
       stitchGenerations,
       ...total,
-      usd: costUsd(cfg.models.critic, criticUsage) + costUsd(cfg.models.chair, chairUsage),
+      criticMode: cfg.criticMode,
+      // Agent mode's `total` above is always zero (the subagent clients define no `takeUsage`), so pricing it
+      // would print a real-looking $0.00 rather than admit nothing was measured.
+      usd: agentMode ? null : costUsd(cfg.models.critic, criticUsage) + costUsd(cfg.models.chair, chairUsage),
     },
     hallucinationRate: Object.fromEntries([...hallucination].map(([critic, t]) => [critic, t.sum / t.n])),
     degradations,

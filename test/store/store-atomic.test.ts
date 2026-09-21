@@ -39,7 +39,7 @@ const v = {
 };
 const fin = {
   stopReason: "converged" as const, committeeRank: ["v00"],
-  spend: { stitchGenerations: 3, inputTokens: 1, outputTokens: 1, cachedTokens: 0, usd: 0.58 },
+  spend: { stitchGenerations: 3, inputTokens: 1, outputTokens: 1, cachedTokens: 0, usd: 0.58, criticMode: "api" as const },
   hallucinationRate: {}, degradations: [], sigma: 3,
 };
 const leftovers = (d: string): string[] => readdirSync(d).filter((f) => f.endsWith(".tmp"));

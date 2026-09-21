@@ -20,7 +20,7 @@ const v = (index: number, composite: number, o: Over = {}) => ({
   critiques: [crit(composite, o.verified ?? [])], composite, gatePass: o.gatePass ?? false,
   prompt: o.prompt ?? `PROMPT-${index}`, openIssues: o.open ?? [], parent: o.parent ?? null,
 });
-const spend = { stitchGenerations: 2, inputTokens: 1, outputTokens: 1, cachedTokens: 0, usd: 0.3 };
+const spend = { stitchGenerations: 2, inputTokens: 1, outputTokens: 1, cachedTokens: 0, usd: 0.3, criticMode: "api" as const };
 const fin = (over: Record<string, unknown> = {}) => ({
   stopReason: "converged" as const, committeeRank: ["v01", "v00"], spend,
   hallucinationRate: { typography: 0.1 }, degradations: [], sigma: 3, ...over,

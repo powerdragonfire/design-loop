@@ -9,7 +9,10 @@ export interface Spend {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
-  usd: number;
+  /** null when the critics were subagents: their tokens never reach this process, so there is nothing to price. */
+  usd: number | null;
+  /** Which mode produced this spend, so a reader of the manifest alone can tell a real zero from an unmetered run. */
+  criticMode: "api" | "agent";
 }
 
 /** A critic dropped from a round, with its cause, so a round is never silently scored on fewer critics (spec §14). */

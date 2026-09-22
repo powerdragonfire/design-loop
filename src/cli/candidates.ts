@@ -125,6 +125,11 @@ export type SelectOptions = GenerateOptions & {
    * disk even when that throw stops `selectCandidate` from ever returning.
    */
   onCandidate?(row: CandidateRow): Promise<void> | void;
+  /**
+   * `RunOptions.measure`, passed through. Without it the stage always rendered in Chromium, whatever the
+   * caller injected: a replayed run re-rendered every candidate rather than read the stored doc.
+   */
+  measure?: (html: string) => Promise<MeasuredDoc>;
 };
 
 /** The numeric suffix of a `c<N>` candidate id, so "c10" sorts after "c2" rather than before it. */
@@ -159,6 +164,7 @@ export function pickWinner(rows: CandidateRow[], sigma: number): CandidateRow {
  */
 export async function selectCandidate(opts: SelectOptions): Promise<Selection> {
   const candidates = await generateCandidates(opts);
+  const measureDoc = opts.measure ?? measure;
   const rows: CandidateRow[] = [];
   const record = async (row: CandidateRow): Promise<void> => {
     rows.push(row);
@@ -172,7 +178,7 @@ export async function selectCandidate(opts: SelectOptions): Promise<Selection> {
     // rather than one malformed screen losing every candidate's spend.
     let doc: MeasuredDoc;
     try {
-      doc = await measure(html);
+      doc = await measureDoc(html);
     } catch (err) {
       await record({
         ...base,
@@ -195,6 +201,13 @@ export async function selectCandidate(opts: SelectOptions): Promise<Selection> {
       opts.cfg,
       opts.llm,
     );
+    // Before ANY read of `committee`: the CALLING CONTRACT on AgentLlmClient holds at every `runCommittee`
+    // call site, not only the edit loop's. A pending critic and a failed one arrive here identically, so reading
+    // first would mark a candidate that is only waiting as failed, and record each waiting critic as a
+    // degradation. Unreachable in agent mode today (loadContract refuses a multi-candidate agent config, and
+    // run.ts routes the single candidate around this stage) and a no-op for the API client. It is here so the
+    // next change to either of those cannot quietly break the contract.
+    opts.llm.throwIfPending?.();
     for (const f of committee.failures) opts.onDegraded(f.critic, f.error, c.id);
     if (committee.critiques.length === 0) {
       await record({

@@ -38,6 +38,16 @@ describe("loadContract", () => {
       .rejects.toThrow(/batchMode is not implemented in v1/);
   });
 
+  it("refuses agent mode with more than one candidate, naming the fields and the fix", async () => {
+    await expect(loadContract(FIX, { criticMode: "agent", candidates: { families: 2 } }))
+      .rejects.toThrow(/agent mode does not yet support multiple candidates.*candidates\.families.*candidates\.variantsPerFamily/);
+    await expect(loadContract(FIX, { criticMode: "agent", candidates: { variantsPerFamily: 3 } }))
+      .rejects.toThrow(/agent mode does not yet support multiple candidates/);
+    // The same candidates block is fine in api mode, and one candidate is fine in agent mode.
+    await expect(loadContract(FIX, { criticMode: "api", candidates: { families: 2, variantsPerFamily: 3 } })).resolves.toBeDefined();
+    await expect(loadContract(FIX, { criticMode: "agent" })).resolves.toBeDefined();
+  });
+
   it("defaults the candidates block to today's single generation", async () => {
     const { config } = await loadContract(FIX);
     expect(config.candidates).toEqual({ families: 1, variantsPerFamily: 0, creativeRange: "EXPLORE", aspects: [] });

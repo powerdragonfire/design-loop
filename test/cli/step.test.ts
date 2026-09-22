@@ -174,6 +174,34 @@ describe("stepRun", () => {
     });
   });
 
+  // Agent mode has no way yet to brief a subagent on a candidate: work orders, the round cursor and the resume
+  // layer all key on `vNN/`. A config asking for more than one candidate is refused rather than quietly run
+  // with one, and refused before Stitch is asked for anything, because every generation is paid for.
+  describe("multiple candidates", () => {
+    const withCandidates = (designDir: string, candidates: Record<string, number>) => {
+      const cfgFile = join(designDir, "config.json");
+      writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, "utf8")), candidates }));
+    };
+
+    for (const candidates of [{ families: 2, variantsPerFamily: 0 }, { families: 1, variantsPerFamily: 1 }]) {
+      it(`refuses ${JSON.stringify(candidates)} before any Stitch generation`, async () => {
+        const designDir = setup();
+        withCandidates(designDir, candidates);
+        let variants = 0;
+        const gen = new FakeGenerator([shot(48), shot(48), shot(48)]);
+        const inner = gen.variants.bind(gen);
+        gen.variants = (...args) => { variants++; return inner(...args); };
+
+        const refusal = stepRun({ designDir, screen: "home", date: DATE, generator: gen });
+        await expect(refusal).rejects.toThrow(/agent mode does not yet support multiple candidates/);
+        await expect(refusal).rejects.toThrow(/candidates\.families.*candidates\.variantsPerFamily/);
+        await expect(refusal).rejects.toThrow(/"families": 1.*"variantsPerFamily": 0.*"criticMode": "api"/);
+        expect(gen.prompts).toEqual([]);
+        expect(variants).toBe(0);
+      });
+    }
+  });
+
   // A critic running an old rubric scores against a standard nobody chose, and nothing about the run would
   // say so — so a work order is refused, not just warned about, the moment `agentsDir` names a directory
   // that is not (or no longer) in sync with the rubrics `dl sync-agents` reads.

@@ -86,10 +86,18 @@ export function resumingGenerator(opts: { runDir: string; inner: Generator; curs
     // and the next round would be generated again instead of replayed. `generate` is the only way in.
     generate: (prompt) => acquire(() => inner.generate(prompt)),
     // Variants are not replayable: they have no version directory to be served from and no cursor slot, so
-    // passing them through would re-pay Stitch on every step. Refused rather than guessed at until the resume
-    // layer is taught about candidates.
+    // passing them through would re-pay Stitch on every step. This should be unreachable: loadContract refuses
+    // agent mode with more than one candidate, and run.ts routes a single-candidate agent run around the
+    // candidate stage entirely. Reaching it means one of those two guards broke. `generateCandidates` catches
+    // a variants failure as a warning and keeps the seed, so the message has to say plainly that this is a bug
+    // and not a passing Stitch failure, or it would be read past.
     variants: async () => {
-      throw new Error("the resume layer cannot replay candidate variants: agent mode needs variantsPerFamily: 0");
+      throw new Error(
+        "BUG: a multi-candidate config reached agent mode despite loadContract's refusal. The resume layer " +
+          "cannot replay candidate variants, so this run is NOT doing what its config asked. This is not a " +
+          "transient Stitch failure. Set candidates.families to 1 and candidates.variantsPerFamily to 0, or " +
+          "use criticMode \"api\".",
+      );
     },
   };
 }

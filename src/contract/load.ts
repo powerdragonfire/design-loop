@@ -85,7 +85,8 @@ async function readScreens(dir: string): Promise<Record<string, string>> {
 /**
  * Load and validate a design/ folder. Validation runs cheapest-and-most-fundamental first
  * so that nothing downstream can spend money before a bad contract fails:
- * config and tokens.json parse -> weights sum to 1.0 -> batchMode off -> sigma measured -> screen exists.
+ * config and tokens.json parse -> weights sum to 1.0 -> batchMode off -> one candidate in agent mode ->
+ * sigma measured -> screen exists.
  */
 export async function loadContract(
   dir: string,
@@ -119,6 +120,20 @@ export async function loadContract(
 
   if (config.batchMode) {
     throw new Error("batchMode is not implemented in v1");
+  }
+
+  // Agent mode briefs its subagents through work orders, a round cursor and a resume layer that all key on
+  // `vNN/`; none of them can name a candidate in `candidates/cN/`, so a multi-candidate run has nowhere to
+  // suspend. Refused here, with the other unimplemented combinations, rather than quietly run with one
+  // candidate: the operator asked for several, and a run that ignores that has not done what it was told.
+  const { families, variantsPerFamily } = config.candidates;
+  const candidates = families * (1 + variantsPerFamily);
+  if (config.criticMode === "agent" && candidates > 1) {
+    throw new Error(
+      `agent mode does not yet support multiple candidates: candidates.families (${families}) and ` +
+        `candidates.variantsPerFamily (${variantsPerFamily}) ask for ${candidates}. ` +
+        `Set "families": 1 and "variantsPerFamily": 0, or use "criticMode": "api".`,
+    );
   }
 
   if (config.sigma === null && !opts.allowNullSigma) {

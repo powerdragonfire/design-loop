@@ -183,8 +183,13 @@ export interface Run {
   writeCandidate(c: CandidateInput): Promise<string>;
   /** Writes `candidates/selection.json`, the record of which candidate won and why. */
   writeSelection(s: SelectionInput): Promise<void>;
-  /** Copies `candidates/<id>/` to `v00/` and registers it as a version. Returns `"v00"`. */
-  promoteCandidate(id: string): Promise<string>;
+  /**
+   * Copies `candidates/<id>/` to `v00/` and registers it as a version. Returns `"v00"`. `v00` is given
+   * what every other version directory carries and a candidate directory does not: the Stitch screen id the
+   * resume layer rebuilds its handle from, and the committee's inputs. Both are optional only so the store's
+   * own tests can promote a bare candidate.
+   */
+  promoteCandidate(id: string, version?: { screenId?: string; inputs?: CommitteeInputs }): Promise<string>;
   finalise(m: Finalisation): Promise<void>;
   /** Accepts a version id (`vNN`) or a written candidate id (`cN`). */
   approve(id: string): Promise<void>;
@@ -446,7 +451,7 @@ function makeRun(
      * gallery. Registering `v00` in `versions` (not just writing it to disk) is what lets `finalise`
      * validate a committeeRank that names it and `approve("v00")` find it afterwards.
      */
-    async promoteCandidate(id) {
+    async promoteCandidate(id, extra = {}) {
       assertSegment("candidate id", id);
       const src = join(dir, "candidates", id);
       let summary: { composite: number; gatePass: boolean };
@@ -467,6 +472,21 @@ function makeRun(
         throw err;
       }
       await cp(src, dest, { recursive: true });
+      // Written into v00 alone, not into the candidate: these are what make it a version like any other —
+      // `resumingGenerator` reads `screen-id.txt` to replay v00 instead of paying Stitch for a different
+      // screen, and the committee inputs are the same three files `writeCommitteeInputs` leaves in every vNN.
+      // Written before `versions.push`, so a v00 that is registered is also complete.
+      const { screenId, inputs } = extra;
+      await Promise.all([
+        ...(screenId ? [writeFile(join(dest, "screen-id.txt"), screenId)] : []),
+        ...(inputs
+          ? [
+              writeFile(join(dest, "digest.txt"), inputs.digest),
+              writeFile(join(dest, "carried-issues.json"), json(inputs.carriedIssues)),
+              writeFile(join(dest, "measurements.json"), json(inputs.measurements)),
+            ]
+          : []),
+      ]);
       versions.push({ version: "v00", composite: summary.composite, gatePass: summary.gatePass });
       return "v00";
     },

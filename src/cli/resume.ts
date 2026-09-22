@@ -191,6 +191,14 @@ export function resumingRun(run: Run, runDir: string): Run {
       if (await done(v.index)) return versionName(v.index);
       return run.writeVersion(v);
     },
+    // Agent mode's round 0 records its screen as candidate `c0` on every replay of that round (see run.ts's
+    // `agentRoundZero`); the store's claim of a candidate directory is a non-recursive `mkdir`, so a second
+    // write would throw. Scored is the same test as for a version: `composite.json` is there. `openExistingRun`
+    // already knows the id from disk, so skipping the write loses no registration.
+    async writeCandidate(c) {
+      if ((await readOptional(join(runDir, "candidates", c.id, "composite.json"))) !== null) return c.id;
+      return run.writeCandidate(c);
+    },
     async openVersion(index) {
       if (await done(index)) return replayed(index);
       // A directory that exists but holds no `composite.json` is the suspend state itself: an earlier process

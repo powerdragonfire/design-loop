@@ -509,6 +509,17 @@ describe("runScreen", () => {
       expect(variants).toBe(0);
     });
 
+    // The resume layer rebuilds v00's handle from `v00/screen-id.txt`; a promoted winner that lacks it would be
+    // regenerated (a different screen) on every replay. Two candidates, the second winning, so the id written
+    // is provably the winner's and not simply the first screen generated.
+    it("writes the winning candidate's screen id into the promoted v00", async () => {
+      const o = opts({ candidates: { families: 2, variantsPerFamily: 0 } }, { llm: llmOf([60, 95]).llm });
+      const res = await runScreen(o);
+      const m = JSON.parse(readFileSync(join(res.runDir, "manifest.json"), "utf8"));
+      expect(m.selection.winner).toBe("c1");
+      expect(readFileSync(join(res.runDir, "v00", "screen-id.txt"), "utf8")).toBe("fake-1");
+    });
+
     it("reports a non-empty hallucination rate for a run that stops at v00", async () => {
       // Before spec fix 1, a run that never reached the edit loop finalised with hallucinationRate: {}
       // because selectCandidate computed it and threw it away; only the loop ever tallied it.

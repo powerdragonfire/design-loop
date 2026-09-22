@@ -16,6 +16,7 @@ import { openRun, versionName, writeChair, type CandidateSummary, type Degradati
 import { readCalibration, type Calibration } from "./calibration.js";
 import { costUsd } from "./pricing.js";
 import { groupTokenIssues } from "./group.js";
+import { buildFirstPrompt } from "./prompt.js";
 import { committeeHooks, noProgress, type Progress } from "./progress.js";
 import type { CriticName, Critique, Issue, MeasuredDoc, Usage } from "../types.js";
 
@@ -144,55 +145,181 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       ? "not metered (agent mode)"
       : `$${(costUsd(cfg.models.critic, criticUsage) + costUsd(cfg.models.chair, chairUsage)).toFixed(2)} so far`;
 
+  /** How v00 came to be, whichever path produced it: what the manifest records and what the loop edits first. */
+  interface Seed {
+    winner: string;
+    summaries: CandidateSummary[];
+    handle: Screen;
+  }
+
   // Every candidate is generated, measured and critiqued once, here; the winner becomes v00 without ever
   // being measured or critiqued again — that is the whole point of running this stage before the loop.
   // Persistence happens from `onCandidate`, as each row is scored, rather than from a loop over the
   // returned rows: `pickWinner` throws when every candidate fails, which would otherwise mean every
   // candidate this stage already paid for is written nowhere (spec fix 3).
-  const { winner, rows } = await selectCandidate({
-    contract, screen, designDir, generator, cfg, progress, llm, sigma,
-    onDegraded: (critic, error, id) => degradations.push({ version: id, critic, error }),
-    onCandidate: async (row) => {
-      await run.writeCandidate({
-        id: row.id, family: row.family, png: row.png, html: row.html, doc: row.doc,
-        critiques: row.critiques, composite: row.composite, gatePass: row.gatePass,
-        prompt: row.prompt, openIssues: row.open,
-      });
-    },
-  });
-  // selectCandidate never calls takeUsage itself, so everything it spent is still sitting in the client
-  // waiting to be claimed; taken here, once, it folds into criticUsage exactly like any other round's.
-  addUsage(criticUsage, llm.takeUsage?.());
-  progress.banner(`candidates · ${rows.length} generated`, { fraction: 0 });
+  const candidateStage = async (): Promise<Seed> => {
+    const { winner, rows } = await selectCandidate({
+      contract, screen, designDir, generator, cfg, progress, llm, sigma, measure: measureDoc,
+      onDegraded: (critic, error, id) => degradations.push({ version: id, critic, error }),
+      onCandidate: async (row) => {
+        await run.writeCandidate({
+          id: row.id, family: row.family, png: row.png, html: row.html, doc: row.doc,
+          critiques: row.critiques, composite: row.composite, gatePass: row.gatePass,
+          prompt: row.prompt, openIssues: row.open,
+        });
+      },
+    });
+    // selectCandidate never calls takeUsage itself, so everything it spent is still sitting in the client
+    // waiting to be claimed; taken here, once, it folds into criticUsage exactly like any other round's.
+    addUsage(criticUsage, llm.takeUsage?.());
+    progress.banner(`candidates · ${rows.length} generated`, { fraction: 0 });
 
-  const candidateSummaries = rows.map(toSummary);
-  await run.writeSelection({ winner: winner.id, rows: candidateSummaries });
-  await run.promoteCandidate(winner.id);
-  log?.(`v00: composite ${winner.composite.toFixed(1)}, ${winner.open.length} open, gate ${winner.gatePass ? "pass" : "fail"} (candidate ${winner.id})`);
+    const summaries = rows.map(toSummary);
+    await run.writeSelection({ winner: winner.id, rows: summaries });
+    // Recomputed from the winner's doc rather than carried out of selectCandidate: both are pure functions of
+    // it, and they are the same three files every edit round leaves behind, so v00 reads like any other vNN.
+    const measured = deterministicCritique(winner.doc, contract.tokens).critique.issues;
+    await run.promoteCandidate(winner.id, {
+      screenId: winner.handle.id,
+      inputs: {
+        digest: distill(winner.doc),
+        carriedIssues: [],
+        measurements: measured.filter((i) => !i.id.startsWith("det-token-")),
+      },
+    });
+    log?.(`v00: composite ${winner.composite.toFixed(1)}, ${winner.open.length} open, gate ${winner.gatePass ? "pass" : "fail"} (candidate ${winner.id})`);
 
-  // Only the WINNER's hallucination rate folds in: the manifest's rate describes the design that was
-  // actually iterated, and averaging in candidates the loop never saw would misdescribe it. Before this
-  // a run that stopped at v00 always finalised with an empty hallucinationRate (spec fix 1).
-  for (const [critic, rate] of Object.entries(winner.hallucinationRate) as [CriticName, number][]) {
-    const tally = hallucination.get(critic) ?? { sum: 0, n: 0 };
-    hallucination.set(critic, { sum: tally.sum + rate, n: tally.n + 1 });
-  }
+    // Only the WINNER's hallucination rate folds in: the manifest's rate describes the design that was
+    // actually iterated, and averaging in candidates the loop never saw would misdescribe it. Before this
+    // a run that stopped at v00 always finalised with an empty hallucinationRate (spec fix 1).
+    for (const [critic, rate] of Object.entries(winner.hallucinationRate) as [CriticName, number][]) {
+      const tally = hallucination.get(critic) ?? { sum: 0, n: 0 };
+      hallucination.set(critic, { sum: tally.sum + rate, n: tally.n + 1 });
+    }
 
-  // Seed the loop's state from the winner instead of re-scoring it: nothing below may measure or
-  // critique v00 a second time.
-  stitchGenerations = rows.length;
-  prevDoc = winner.doc;
-  carried = winner.open;
-  prevOpen = winner.open;
-  rounds.push({ version: "v00", composite: winner.composite, gatePass: winner.gatePass });
-  records.set("v00", {
-    png: winner.png, doc: winner.doc, critiques: winner.critiques, open: winner.open,
-    composite: winner.composite, prompt: winner.prompt, handle: winner.handle,
-  });
+    // Seed the loop's state from the winner instead of re-scoring it: nothing below may measure or
+    // critique v00 a second time.
+    stitchGenerations = rows.length;
+    prevDoc = winner.doc;
+    carried = winner.open;
+    prevOpen = winner.open;
+    rounds.push({ version: "v00", composite: winner.composite, gatePass: winner.gatePass });
+    records.set("v00", {
+      png: winner.png, doc: winner.doc, critiques: winner.critiques, open: winner.open,
+      composite: winner.composite, prompt: winner.prompt, handle: winner.handle,
+    });
+    return { winner: winner.id, summaries, handle: winner.handle };
+  };
+
+  /**
+   * Agent mode's round 0: NOT dead code, and NOT an oversight next to `candidateStage` above.
+   *
+   * Agent mode suspends a run by writing a work order naming files under `vNN/`, and resumes it by replaying
+   * from round 0 with a round cursor and a resume layer that also only know `vNN/`. The candidate stage writes
+   * nowhere a subagent can be pointed at: its committee inputs never reach disk, its screens live under
+   * `candidates/cN/` only after scoring, and v00 exists only once the winner is promoted. Run through it,
+   * every critic reads as pending, the candidate is marked failed, and the run dies with "no candidate could
+   * be scored" instead of suspending.
+   *
+   * With exactly one candidate the stage chooses nothing: its only candidate always wins. So an agent-mode
+   * run scores that one screen the way the edit loop scores every other round — claim `v00/`, write what the
+   * critics read, run the committee, `throwIfPending()`, score, `finish` — which is how round 0 worked on this
+   * branch before the candidate stage existed. More than one candidate never gets here: loadContract refuses
+   * that config before anything is spent.
+   *
+   * It then records the screen as candidate `c0`, winner of a one-row selection, exactly as the stage would
+   * have, so an agent-mode run's directory and manifest match an API-mode run's (the replay-equivalence test
+   * compares the manifests) and `report`/`approve c0` need no knowledge of which mode produced it.
+   */
+  const agentRoundZero = async (): Promise<Seed> => {
+    const version = versionName(0);
+    const prompt = buildFirstPrompt(contract, screen);
+    progress.banner(`${version} · first generation`, {
+      fraction: 0,
+      status: `${spendStatus()} · ${stitchGenerations} Stitch generations`,
+    });
+    const handle: Screen = await progress.phase("stitch generate", () => generator.generate(prompt));
+    stitchGenerations++;
+    const [html, png] = await progress.phase(
+      "fetch html + image",
+      async () => [await handle.getHtml(), await handle.getImage()] as const,
+      ([h, p]) => `${Math.round(h.length / 1024)} KB html, ${Math.round(p.length / 1024)} KB png`,
+    );
+    const doc = await progress.phase("measure", () => measureDoc(html), (d) => `${d.nodes.length} nodes`);
+    const det = deterministicCritique(doc, contract.tokens);
+    const digest = distill(doc);
+    const measurements = det.critique.issues.filter((i) => !i.id.startsWith("det-token-"));
+
+    // Claimed and filled BEFORE the committee runs: a round that suspends must already have left behind
+    // everything the dispatched critics are told to read, and `screen-id.txt` is what the next step replays
+    // this screen from instead of paying Stitch for a different one.
+    const slot = await run.openVersion(0);
+    await slot.writeGenerated({ png, html, doc, prompt, screenId: handle.id, parent: null });
+    await slot.writeCommitteeInputs({ digest, carriedIssues: [], measurements });
+
+    const committee = await progress.phase(
+      "critics",
+      () =>
+        runCommittee(
+          { contract, screen, digest, imagePng: png, openIssues: [], measurements },
+          cfg,
+          llm,
+          committeeHooks(progress, true),
+        ),
+      (c) => `${c.critiques.length}/${c.critiques.length + c.failures.length} ok`,
+    );
+    // Before ANY read of `committee` — see the CALLING CONTRACT on AgentLlmClient. This is the line the
+    // candidate stage could not honour usefully: here it throws a WorkOrderPending that `stepRun` turns into
+    // a work order and exit 10.
+    llm.throwIfPending?.();
+    addUsage(criticUsage, llm.takeUsage?.());
+    for (const f of committee.failures) degradations.push({ version, critic: f.critic, error: f.error });
+    // The deterministic critique alone is not a review: without one LLM critic the round is not scored (spec §14).
+    if (committee.critiques.length === 0) {
+      throw new Error(`committee unavailable: ${committee.failures.map((f) => `${f.critic}: ${f.error}`).join("; ")}`);
+    }
+
+    const validated = validateEvidence(committee.critiques, doc);
+    for (const [critic, rate] of Object.entries(validated.hallucinationRate) as [CriticName, number][]) {
+      const tally = hallucination.get(critic) ?? { sum: 0, n: 0 };
+      hallucination.set(critic, { sum: tally.sum + rate, n: tally.n + 1 });
+    }
+    const scored = [...promoteResolutions(validated.critiques, null, doc, []), det.critique];
+    const score = composite(scored, renormalise(cfg.weights, scored.map((c) => c.critic)));
+    const open = openIssues(scored);
+    const verdict = gate(scored, det.measurementsPass);
+
+    // Recorded as the stage's lone candidate BEFORE v00 is marked scored, so a crash between the two leaves an
+    // unscored v00 that the next step re-scores and re-records, never a scored v00 with no candidate behind
+    // it. On a replay `resumingRun` declines to rewrite a candidate that is already on disk.
+    const summaries: CandidateSummary[] = [{
+      id: "c0", family: 0, composite: score, gatePass: verdict.pass,
+      blockers: open.filter((i) => i.severity === "blocker").length,
+    }];
+    await run.writeCandidate({
+      id: "c0", family: 0, png, html, doc, critiques: scored, composite: score, gatePass: verdict.pass, prompt, openIssues: open,
+    });
+    await run.writeSelection({ winner: "c0", rows: summaries });
+    // `rawCritiques` is the committee's answers before `validateEvidence` touched them; see the edit loop.
+    await slot.finish({ critiques: scored, rawCritiques: committee.critiques, composite: score, gatePass: verdict.pass, openIssues: open });
+    log?.(`${slot.version}: composite ${score.toFixed(1)}, ${open.length} open, gate ${verdict.pass ? "pass" : "fail"}`);
+
+    prevDoc = doc;
+    carried = open;
+    prevOpen = open;
+    rounds.push({ version: slot.version, composite: score, gatePass: verdict.pass });
+    records.set(slot.version, { png, doc, critiques: scored, open, composite: score, prompt, handle });
+    return { winner: "c0", summaries, handle };
+  };
+
+  // loadContract has already refused agent mode with more than one candidate, so in agent mode this is always
+  // the single-candidate case; the count is still checked here so the routing says what it depends on.
+  const seed = agentMode && totalCandidates === 1 ? await agentRoundZero() : await candidateStage();
+  const candidateSummaries = seed.summaries;
 
   const loop = async (): Promise<{ stop: StopReason; best: string }> => {
     let prompt = "";
-    let baseHandle: Screen = winner.handle;
+    let baseHandle: Screen = seed.handle;
     // The chair changes `prompt` was built to make; recorded on the version that prompt produces, so a
     // regression can be read back against what the round was trying to fix. v00 has none: it was not
     // built from a chair prompt at all.
@@ -386,7 +513,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     sigma,
     calibration,
     candidates: candidateSummaries,
-    selection: { winner: winner.id, rows: candidateSummaries },
+    selection: { winner: seed.winner, rows: candidateSummaries },
   });
   return { stopReason, versions: rounds.length, best: stoppedBest ?? committeeRank[0]!, runDir: run.dir, abortReason };
 }

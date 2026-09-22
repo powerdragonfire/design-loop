@@ -298,6 +298,28 @@ describe("resumingRun", () => {
     expect(JSON.parse(readFileSync(join(first.dir, "manifest.json"), "utf8")).best).toBe("v00");
   });
 
+  // Agent mode's round 0 records its screen as candidate c0 on every replay of that round. The store claims a
+  // candidate directory with a non-recursive mkdir, so without this the SECOND step of every agent-mode run
+  // would die with "c0 already exists" — a bug no single-step test can see.
+  it("declines to rewrite a candidate already on disk, and still writes one that is not", async () => {
+    const designDir = mkdtempSync(join(tmpdir(), "dl-cand-"));
+    const first = await openRun(designDir, "home", "2026-09-20");
+    const candidate = (id: string, composite: number) => ({
+      id, family: 0, png: Buffer.from("png"), html: html(0), doc: doc(1), critiques: [critique()],
+      composite, gatePass: false, prompt: "p", openIssues: [],
+    });
+    await first.writeVersion(version(0));
+    await first.writeCandidate(candidate("c0", 70));
+
+    const resumed = resumingRun(await openExistingRun(first.dir), first.dir);
+    expect(await resumed.writeCandidate({ ...candidate("c0", 1), html: "OVERWRITTEN" })).toBe("c0");
+    expect(readFileSync(join(first.dir, "candidates", "c0", "screen.html"), "utf8")).toBe(html(0));
+    expect(JSON.parse(readFileSync(join(first.dir, "candidates", "c0", "composite.json"), "utf8")).composite).toBe(70);
+
+    expect(await resumed.writeCandidate(candidate("c1", 80))).toBe("c1");
+    expect(JSON.parse(readFileSync(join(first.dir, "candidates", "c1", "composite.json"), "utf8")).composite).toBe(80);
+  });
+
   it("claims a real directory for a round that is not on disk yet", async () => {
     const { run, resumed } = await scoredRun();
     const handle = await resumed.openVersion(1);

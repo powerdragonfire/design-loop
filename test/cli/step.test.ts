@@ -73,6 +73,10 @@ describe("stepRun", () => {
     expect(existsSync(join(runDir, "manifest.json"))).toBe(true);
     const manifest = JSON.parse(readFileSync(join(runDir, "manifest.json"), "utf8"));
     expect(manifest.stopReason).toBe("pass");
+    // The one candidate the run had, recorded from v00's own score, exactly as API mode records it.
+    const v00 = manifest.versions[0];
+    expect(manifest.candidates).toEqual([{ id: "c0", family: 0, composite: v00.composite, blockers: 0, gatePass: v00.gatePass }]);
+    expect(manifest.selection).toEqual({ winner: "c0", rows: manifest.candidates });
   });
 
   it("makes no second Stitch generation when replaying round 0", async () => {
@@ -127,6 +131,37 @@ describe("stepRun", () => {
       // manifest here, and a finalised run refuses every later write.
       expect(existsSync(join(runDir, "manifest.json"))).toBe(false);
       expect(existsSync(join(runDir, "v00", "composite.json"))).toBe(true);
+    });
+
+    // The candidate record must be v00's OWN scoring — the same composite, gate and open issues — not numbers
+    // built to agree with an API run, or the replay-equivalence test's candidates/selection match proves
+    // nothing. A blocker makes `blockers` non-trivial. Two further steps replay round 0, and each re-records c0:
+    // neither may throw on the existing directory or change what the first recording wrote.
+    it("records v00 as candidate c0 from v00's own scoring, and replays it without rewriting", async () => {
+      const designDir = setup();
+      await step(designDir);
+      const runDir = join(designDir, "runs", `${DATE}-home`);
+      const blocker = { ...major("a-1"), severity: "blocker" };
+      for (const c of CRITICS) answer(runDir, "v00", c, 60, c === "accessibility" ? [blocker] : []);
+      await step(designDir, runDir);
+
+      const read = (...p: string[]) => readFileSync(join(runDir, ...p), "utf8");
+      const c0 = { composite: read("candidates", "c0", "composite.json"), open: read("candidates", "c0", "open-issues.json") };
+      expect(c0.composite).toBe(read("v00", "composite.json"));
+      expect(c0.open).toBe(read("v00", "open-issues.json"));
+      const blockers = (JSON.parse(c0.open) as { severity: string }[]).filter((i) => i.severity === "blocker").length;
+      expect(blockers).toBeGreaterThan(0);
+      const { composite, gatePass } = JSON.parse(c0.composite);
+      expect(JSON.parse(read("candidates", "selection.json"))).toEqual({
+        winner: "c0", rows: [{ id: "c0", family: 0, composite, blockers, gatePass }],
+      });
+
+      writeFileSync(join(runDir, "v00", "inbox", "chair.json"), JSON.stringify({ prompt: "fix it", changeIds: [] }));
+      const out = await step(designDir, runDir);
+      expect(out.done).toBe(false);
+      expect((JSON.parse(readFileSync((out as { workOrder: string }).workOrder, "utf8")) as { version: string }).version).toBe("v01");
+      expect(read("candidates", "c0", "composite.json")).toBe(c0.composite);
+      expect(read("candidates", "c0", "open-issues.json")).toBe(c0.open);
     });
 
     it("edits from the chair's prompt and suspends on the next round's critics", async () => {

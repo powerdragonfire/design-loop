@@ -43,13 +43,28 @@ const client = (fetch: FetchLike) => new FigmaClient("FILEKEY", "figd_secret", {
 describe("FigmaClient", () => {
   it("reads a node's document subtree", async () => {
     const { fetch } = stubFetch({ "/files/": () => ({ json: async () => ({ nodes: { "1:1": { document: NODE } } }) }) });
-    await expect(client(fetch).getNode("1:1")).resolves.toMatchObject({ id: "1:1", name: "Settings" });
+    await expect(client(fetch).getNode("1:1")).resolves.toMatchObject({ document: { id: "1:1", name: "Settings" } });
   });
 
   it("treats an empty nodes map as a missing node, not a transport failure", async () => {
     // Figma answers 200 with {} for an id that is not in the file.
     const { fetch } = stubFetch({ "/files/": () => ({ json: async () => ({ nodes: {} }) }) });
     await expect(client(fetch).getNode("9:9")).rejects.toThrow("has no node 9:9");
+  });
+
+  it("returns the component names alongside the subtree, and never asks for vector geometry", async () => {
+    const { fetch, calls } = stubFetch({
+      "/files/": () => ({
+        json: async () => ({
+          nodes: { "1:1": { document: NODE, components: { "c:1": { name: "Button" } }, componentSets: {} } },
+        }),
+      }),
+    });
+    const res = await client(fetch).getNode("1:1");
+    expect(res.components).toEqual({ "c:1": { name: "Button" } });
+    expect(res.componentSets).toEqual({});
+    // Path strings would be stored in screen.html and handed to every critic, for no signal.
+    expect(calls.every((u) => !u.includes("geometry"))).toBe(true);
   });
 
   it("never puts the token in the URL", async () => {
@@ -123,7 +138,7 @@ describe("FigmaGenerator", () => {
   it("reads an existing frame back through fromId without asking for design work", async () => {
     const { fetch } = stubFetch({ "/files/": () => ({ json: async () => ({ nodes: { "1:1": { document: NODE } } }) }) });
     const html = await gen(fetch).fromId("1:1").getHtml();
-    expect(JSON.parse(html)).toMatchObject({ id: "1:1" });
+    expect(JSON.parse(html)).toMatchObject({ document: { id: "1:1" } });
   });
 
   it("returns a distinct getHtml per frame, so the resume layer's hash index stays keyed", async () => {
@@ -147,6 +162,16 @@ describe("figmaMeasure", () => {
     expect(doc.nodes.map((n) => n.selector)).toEqual(["1:2"]);
     // frame-relative, not the canvas x=100
     expect(doc.nodes[0]!.bbox.x).toBe(0);
+  });
+
+  it("measures the stored response shape using its component names", async () => {
+    const tree: FigmaNode = {
+      ...NODE,
+      children: [{ id: "1:3", name: "Sign out", type: "INSTANCE", componentId: "c:1",
+        absoluteBoundingBox: { x: 100, y: 10, width: 120, height: 48 } }],
+    };
+    const doc = await figmaMeasure()(JSON.stringify({ document: tree, components: { "c:1": { name: "Account action" } } }));
+    expect(doc.nodes[0]!.role).toBe("button");
   });
 
   it("honours an explicit viewport so a 390pt frame is not measured against 393", async () => {

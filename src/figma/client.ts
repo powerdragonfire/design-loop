@@ -1,4 +1,4 @@
-import type { FigmaNode } from "./serialise.js";
+import type { FigmaNode, FigmaNodeResponse } from "./serialise.js";
 
 /** Minimal shape of the fetch we need, so tests inject one and the module has no global dependency. */
 export interface FetchResponse {
@@ -45,18 +45,29 @@ export class FigmaClient {
     return (await res.json()) as Record<string, unknown>;
   }
 
-  /** The node's full subtree, as `GET /v1/files/:key/nodes` returns it under `nodes[id].document`. */
-  async getNode(nodeId: string): Promise<FigmaNode> {
+  /**
+   * The node's subtree plus the component and component-set names its instances point at, as
+   * `GET /v1/files/:key/nodes` returns them under `nodes[id]`. The names are what tells a tappable instance
+   * from a decorative one (see `isInteractive`).
+   *
+   * No `geometry=paths`: nothing reads vector geometry, and this JSON is stored as `screen.html` and handed to
+   * every critic — an icon-heavy frame's path strings could run to megabytes of context for no signal.
+   */
+  async getNode(nodeId: string): Promise<FigmaNodeResponse> {
     const body = await this.getJson(
-      `/files/${encodeURIComponent(this.fileKey)}/nodes?ids=${encodeURIComponent(nodeId)}&geometry=paths`,
+      `/files/${encodeURIComponent(this.fileKey)}/nodes?ids=${encodeURIComponent(nodeId)}`,
       `node ${nodeId}`,
     );
-    const nodes = body["nodes"] as Record<string, { document?: FigmaNode } | undefined> | undefined;
+    const nodes = body["nodes"] as Record<string, Partial<FigmaNodeResponse> | undefined> | undefined;
     const entry = nodes?.[nodeId];
     // Figma answers 200 with an empty `nodes` map for an id that does not exist in the file, so the
     // absent case has to be caught here rather than read as a transport failure.
     if (!entry?.document) throw new Error(`Figma has no node ${nodeId} in this file`);
-    return entry.document;
+    return {
+      document: entry.document as FigmaNode,
+      components: entry.components ?? {},
+      componentSets: entry.componentSets ?? {},
+    };
   }
 
   /** A rendered PNG of the node. Two hops: ask for a signed URL, then download it. */

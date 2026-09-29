@@ -23,7 +23,20 @@ export interface FigmaNode {
   rectangleCornerRadii?: number[];
   /** Prototyping links. Their presence is the strongest available signal that a node is tappable. */
   reactions?: unknown[];
+  /** INSTANCE only: the main component, looked up in `FigmaNodeResponse.components` for its name. */
+  componentId?: string;
   children?: FigmaNode[];
+}
+
+/** The component and set names an instance resolves to. */
+export interface ComponentNames {
+  components?: Record<string, { name: string; componentSetId?: string }>;
+  componentSets?: Record<string, { name: string }>;
+}
+
+/** What `GET /v1/files/:key/nodes` returns for one id: the subtree, plus the names its instances point at. */
+export interface FigmaNodeResponse extends ComponentNames {
+  document: FigmaNode;
 }
 
 export interface FigmaPaint {
@@ -82,19 +95,29 @@ const CONTAINER_TYPES = new Set(["FRAME", "GROUP", "COMPONENT", "COMPONENT_SET",
  */
 const INTERACTIVE_NAME = /(^|[^a-z])(button|btn|link|tab|toggle|switch|chip|action|row|field|input|cta)([^a-z]|$)/i;
 
-export function isInteractive(node: FigmaNode): boolean {
+/**
+ * An instance's own layer name is usually its label ("Sign out"), which says nothing about what it is. Its main
+ * component says more ("Settings/Account action"), and for a variant the component is named only by its props
+ * ("State=Default, Size=Large") — the word "Button" lives on the component SET. All three are checked.
+ */
+export function isInteractive(node: FigmaNode, names: ComponentNames = {}): boolean {
   if (Array.isArray(node.reactions) && node.reactions.length > 0) return true;
-  return INTERACTIVE_NAME.test(node.name);
+  if (INTERACTIVE_NAME.test(node.name)) return true;
+  const component = node.componentId ? names.components?.[node.componentId] : undefined;
+  if (!component) return false;
+  if (INTERACTIVE_NAME.test(component.name)) return true;
+  const set = component.componentSetId ? names.componentSets?.[component.componentSetId] : undefined;
+  return set !== undefined && INTERACTIVE_NAME.test(set.name);
 }
 
-function tagOf(node: FigmaNode): string {
-  if (isInteractive(node)) return "button";
+function tagOf(node: FigmaNode, names: ComponentNames): string {
+  if (isInteractive(node, names)) return "button";
   if (node.type === "TEXT") return "span";
   if (CONTAINER_TYPES.has(node.type)) return "div";
   return node.type.toLowerCase();
 }
 
-export interface SerialiseOptions {
+export interface SerialiseOptions extends ComponentNames {
   /**
    * Viewport the bboxes are expressed in. Defaults to the root frame's own size. Coordinates are made
    * relative to the root, because `insetIssues` compares `bbox.y` against a fixed viewport height and
@@ -153,8 +176,8 @@ export function serialise(root: FigmaNode, opts: SerialiseOptions = {}): Measure
 
       nodes.push({
         selector: node.id,
-        tag: tagOf(node),
-        role: isInteractive(node) ? "button" : null,
+        tag: tagOf(node, opts),
+        role: isInteractive(node, opts) ? "button" : null,
         text,
         bbox: {
           x: Number((b.x - originX).toFixed(2)),

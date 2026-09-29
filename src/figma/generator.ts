@@ -1,7 +1,7 @@
 import type { MeasuredDoc } from "../types.js";
 import type { Generator, Screen, VariantOptions } from "../stitch/adapter.js";
 import type { FigmaClient } from "./client.js";
-import { serialise, type FigmaNode, type SerialiseOptions } from "./serialise.js";
+import { serialise, type FigmaNode, type FigmaNodeResponse, type SerialiseOptions } from "./serialise.js";
 
 /**
  * Not a failure: the run cannot continue until a frame exists in Figma. Figma's REST API cannot create
@@ -118,12 +118,22 @@ export class FigmaGenerator implements Generator {
  */
 export function figmaMeasure(opts: SerialiseOptions = {}): (html: string) => Promise<MeasuredDoc> {
   return async (html: string) => {
-    let node: FigmaNode;
+    let parsed: unknown;
     try {
-      node = JSON.parse(html) as FigmaNode;
+      parsed = JSON.parse(html);
     } catch {
       throw new Error("figmaMeasure expected a serialised Figma node tree, not HTML");
     }
-    return serialise(node, opts);
+    // What `getHtml` stores: the subtree with the component names its instances resolve to. A bare node is
+    // accepted too, for a tree built by hand, and is measured without those names.
+    const response = parsed as Partial<FigmaNodeResponse>;
+    if (response.document) {
+      return serialise(response.document, {
+        ...opts,
+        components: response.components ?? opts.components,
+        componentSets: response.componentSets ?? opts.componentSets,
+      });
+    }
+    return serialise(parsed as FigmaNode, opts);
   };
 }

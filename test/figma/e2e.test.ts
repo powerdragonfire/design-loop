@@ -94,7 +94,7 @@ describe("the Figma loop, end to end", () => {
     const scored = await step(designDir, figmaApi(), runDir);
     expect(orderOf(scored).kind).toBe("critics");
     // The frame is frozen into the version directory as the node tree, and measured natively from it.
-    expect(JSON.parse(readFileSync(join(runDir, "v00", "screen.html"), "utf8")).id).toBe("10:1");
+    expect(JSON.parse(readFileSync(join(runDir, "v00", "screen.html"), "utf8")).document.id).toBe("10:1");
     expect(readFileSync(join(runDir, "v00", "screen.png")).subarray(0, 4)).toEqual(PNG.subarray(0, 4));
     const doc = JSON.parse(readFileSync(join(runDir, "v00", "digest.json"), "utf8"));
     expect(doc.nodes.map((n: { selector: string }) => n.selector)).toEqual(["10:11"]);
@@ -128,7 +128,7 @@ describe("the Figma loop, end to end", () => {
     const next = await step(designDir, api, runDir);
     expect(orderOf(next).kind).toBe("critics");
     expect(orderOf(next).version).toBe("v01");
-    expect(JSON.parse(readFileSync(join(runDir, "v01", "screen.html"), "utf8")).id).toBe("10:2");
+    expect(JSON.parse(readFileSync(join(runDir, "v01", "screen.html"), "utf8")).document.id).toBe("10:2");
     // v00 was already frozen on disk, so only the new frame was read from Figma.
     expect(api.reads).toEqual(["10:2"]);
     expect(existsSync(join(runDir, "manifest.json"))).toBe(false);

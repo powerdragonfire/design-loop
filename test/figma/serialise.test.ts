@@ -107,6 +107,43 @@ describe("serialise", () => {
     expect(isInteractive({ id: "1:1", name: "Field / Username", type: "FRAME" })).toBe(true);
   });
 
+  describe("interactivity from component names", () => {
+    const names = {
+      components: {
+        "c:action": { name: "Settings/Account action" },
+        "c:variant": { name: "State=Default, Size=Large", componentSetId: "s:button" },
+        "c:avatar": { name: "Data / Avatar Stack" },
+      },
+      componentSets: { "s:button": { name: "Primary Button" } },
+    };
+    const instance = (name: string, componentId: string): FigmaNode => ({ id: "9:9", name, type: "INSTANCE", componentId });
+
+    it("reads an instance named for its label through its main component", () => {
+      // The real Spontai case: the layer is called "Sign out", which says nothing; its component says "action".
+      expect(isInteractive(instance("Sign out", "c:action"), names)).toBe(true);
+      expect(isInteractive(instance("Sign out", "c:action"))).toBe(false); // without the names it cannot tell
+    });
+
+    it("reads a variant through its component set, since the variant is named only by its props", () => {
+      expect(isInteractive(instance("Save", "c:variant"), names)).toBe(true);
+    });
+
+    it("leaves a decorative instance alone", () => {
+      expect(isInteractive(instance("Avatars", "c:avatar"), names)).toBe(false);
+    });
+
+    it("feeds the names into the doc, so tap and safe-area checks see the instance", () => {
+      const doc = serialise(
+        frame([{ ...instance("Sign out", "c:action"), absoluteBoundingBox: { x: 15445, y: 100, width: 120, height: 30 } }]),
+        names,
+      );
+      expect(doc.nodes[0]!.tag).toBe("button");
+      expect(doc.nodes[0]!.role).toBe("button");
+      const { critique } = deterministicCritique(doc, {});
+      expect(critique.issues.some((i) => i.id.startsWith("det-tap-"))).toBe(true); // 120x30 is under 44pt tall
+    });
+  });
+
   it("gives interactive nodes a tag and role the deterministic critic recognises", () => {
     const doc = serialise(
       frame([

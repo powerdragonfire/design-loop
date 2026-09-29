@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DesignPending } from "../figma/generator.js";
 import { AgentChairClient } from "../chair/agent.js";
@@ -10,7 +10,7 @@ import { openExistingRun, openRun, writeAtomic } from "../store/store.js";
 import type { Generator } from "../stitch/adapter.js";
 import type { CriticName, MeasuredDoc } from "../types.js";
 import { noProgress, type Progress } from "./progress.js";
-import { resumingGenerator, resumingMeasure, resumingRun, type RoundCursor } from "./resume.js";
+import { listVersions, readOptional, resumingGenerator, resumingMeasure, resumingRun, type RoundCursor } from "./resume.js";
 import { runScreen, type RunResult } from "./run.js";
 
 export interface StepOptions {
@@ -34,6 +34,11 @@ export interface StepOptions {
   agentsDir?: string;
   /** Figma runs only: the file and page a design work order points the operator at. */
   figma?: { fileKey: string; pageId?: string };
+  /**
+   * Figma runs only: freeze every frame the operator has recorded into its version directory before the loop
+   * runs (see `snapshotDesigns`). Off for Stitch, whose screens are written whole by the round that made them.
+   */
+  snapshotDesigns?: boolean;
 }
 
 export type StepResult =
@@ -187,6 +192,64 @@ export async function writeDesignOrder(opts: {
   return file;
 }
 
+/** Figma ids compared as the operator might write them: a link's `123-456` is the same frame as `123:456`. */
+const sameFrame = (a: string, b: string): boolean => a.trim().replace("-", ":") === b.trim().replace("-", ":");
+
+const exists = (file: string): Promise<boolean> =>
+  stat(file).then(() => true, (err: NodeJS.ErrnoException) => (err.code === "ENOENT" ? false : Promise.reject(err)));
+
+/**
+ * Reads each frame the operator has recorded — a `vNN/screen-id.txt` with no `screen.html` beside it — and
+ * writes its PNG and node tree into that version directory, before the loop runs.
+ *
+ * Doing it here, outside `runScreen`, is what keeps a bad answer repairable. Inside the loop, a mistyped id, a
+ * Figma 429 or a frame not yet readable would be caught by the edit loop and recorded as an aborted run, which
+ * finalises it for good. Out here it is a plain failure: nothing is written, and the operator fixes the id and
+ * steps again. It also freezes the frame as it was when the round was scored, so a later tweak in Figma cannot
+ * change what an earlier version is judged on.
+ *
+ * It refuses an id equal to the order's `editFrom`: that is the frame this round was meant to be built FROM,
+ * so recording it means the operator edited it in place — and after a regression the loop builds from it
+ * again. The work order says to duplicate; this makes the rule mechanical rather than a hope.
+ *
+ * The PNG is written before the HTML, and the HTML marks the version as snapshotted, so a crash between the two
+ * leaves the version to be fetched again rather than half-served from disk.
+ */
+export async function snapshotDesigns(runDir: string, generator: Generator): Promise<string[]> {
+  if (!generator.fromId) throw new Error("snapshotDesigns needs a generator that can rebuild a frame from its id");
+  const taken: string[] = [];
+  for (const version of await listVersions(runDir)) {
+    const dir = join(runDir, version);
+    const id = (await readOptional(join(dir, "screen-id.txt")))?.trim();
+    if (!id) continue;
+    if (await exists(join(dir, "screen.html"))) continue;
+
+    const raw = await readOptional(join(dir, "work-order.json"));
+    const order = raw === null ? null : (JSON.parse(raw) as {
+      kind?: string; units?: { inputs?: { editFrom?: string | null; editFromVersion?: string | null } }[];
+    });
+    const inputs = order?.kind === "design" ? order.units?.[0]?.inputs : undefined;
+    if (inputs?.editFrom && sameFrame(inputs.editFrom, id)) {
+      throw new Error(
+        `${version}/screen-id.txt records ${id}, the frame this round was to be built FROM` +
+          `${inputs.editFromVersion ? ` (${inputs.editFromVersion})` : ""}. Duplicate that frame, apply the edit to ` +
+          "the copy, and record the copy's id instead: editing it in place destroys the frame a later round may " +
+          "build from again.",
+      );
+    }
+
+    const handle = generator.fromId(id);
+    // The node first: a wrong id then fails as "Figma has no node …", which names the mistake, rather than as a
+    // missing image URL, which does not.
+    const html = await handle.getHtml();
+    const png = await handle.getImage();
+    await writeAtomic(join(dir, "screen.png"), png);
+    await writeAtomic(join(dir, "screen.html"), html);
+    taken.push(version);
+  }
+  return taken;
+}
+
 /**
  * Advances a run by one suspension. Everything already on disk is replayed for free; the first step that needs
  * an answer nobody has written stops and says what to dispatch.
@@ -205,6 +268,11 @@ export async function stepRun(opts: StepOptions): Promise<StepResult> {
   // freshly claimed run is equivalent there — every round it writes registers itself through `finish`.
   const run = opts.runDir ? await openExistingRun(opts.runDir) : await openRun(designDir, screen, date);
   const runDir = run.dir;
+
+  // Outside the try below on purpose: a failure here must be a plain failure, never a suspension or an abort.
+  if (opts.snapshotDesigns) {
+    for (const version of await snapshotDesigns(runDir, generator)) log?.(`Read ${version}'s frame from Figma`);
+  }
 
   // One cursor, written only by the resuming generator, read by both agent clients to find the round's
   // directory. -1 until the first generate-or-edit, so a read before then names no version at all.

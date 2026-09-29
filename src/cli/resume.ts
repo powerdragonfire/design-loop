@@ -35,7 +35,7 @@ export async function listVersions(runDir: string): Promise<string[]> {
 }
 
 /** null for a file that is simply not there; any other failure is a real one and is not swallowed. */
-const readOptional = async (file: string): Promise<string | null> =>
+export const readOptional = async (file: string): Promise<string | null> =>
   readFile(file, "utf8").catch((err: NodeJS.ErrnoException) => (missing(err) ? null : Promise.reject(err)));
 
 /**

@@ -240,7 +240,7 @@ function assertSegment(what: string, value: string): void {
 }
 
 /** The temp file sits beside its target: rename is only atomic within one filesystem. */
-export async function writeAtomic(file: string, content: string): Promise<void> {
+export async function writeAtomic(file: string, content: string | Uint8Array): Promise<void> {
   const tmp = join(dirname(file), `.${randomUUID()}.tmp`);
   try {
     await writeFile(tmp, content);

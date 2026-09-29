@@ -11,6 +11,7 @@ import {
   type RoundCursor,
 } from "../../src/cli/resume.js";
 import { runScreen } from "../../src/cli/run.js";
+import { DesignPending } from "../../src/figma/generator.js";
 import { FakeGenerator, StitchGenerator, type Generator, type Screen } from "../../src/stitch/adapter.js";
 import { readQuota } from "../../src/stitch/quota.js";
 import { openExistingRun, openRun } from "../../src/store/store.js";
@@ -150,6 +151,69 @@ describe("resumingGenerator", () => {
     const runDir = seed([{ ...shot(0), doc: doc(1), screenId: "fake-0" }]);
     // "Nothing on disk" would quietly send every page back through a browser render instead of saying why.
     await expect(listVersions(join(runDir, "v00", "screen.html"))).rejects.toMatchObject({ code: "ENOTDIR" });
+  });
+});
+
+describe("resumingGenerator with a generator that suspends for design work", () => {
+  // Stands in for FigmaGenerator: it cannot create or edit, only rebuild a handle for a recorded frame.
+  const figmaLike = (): Generator => ({
+    generate: async (p) => { throw new DesignPending(p, null); },
+    variants: async () => { throw new Error("unused"); },
+    fromId: (id) => ({
+      id,
+      edit: async (p) => { throw new DesignPending(p, id); },
+      getHtml: async () => "unused",
+      getImage: async () => Buffer.from("unused"),
+    }),
+  });
+
+  it("stamps a first generation with v00 and no parent", async () => {
+    const runDir = mkdtempSync(join(tmpdir(), "dl-resume-"));
+    const cursor: RoundCursor = { index: -1 };
+    const err = await resumingGenerator({ runDir, inner: figmaLike(), cursor }).generate("p0").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DesignPending);
+    const d = err as DesignPending;
+    expect(d.version).toBe("v00");
+    expect(d.parentVersion).toBeNull();
+    expect(d.parentNodeId).toBeNull();
+    expect(d.prompt).toBe("p0");
+  });
+
+  it("stamps an edit with the next version and the version it builds on", async () => {
+    const runDir = seed([{ ...shot(0), doc: doc(1), screenId: "1:1" }]);
+    const cursor: RoundCursor = { index: -1 };
+    const gen = resumingGenerator({ runDir, inner: figmaLike(), cursor });
+    const v00 = await gen.generate("p0");
+    const err = (await v00.edit("p1").catch((e: unknown) => e)) as DesignPending;
+    expect(err).toBeInstanceOf(DesignPending);
+    expect(err.version).toBe("v01");
+    expect(err.parentVersion).toBe("v00");
+    expect(err.parentNodeId).toBe("1:1");
+  });
+
+  it("after a regression, names the best version as the parent, not the previous round", async () => {
+    // v00 and v01 are on disk. The loop regressed at v01, so it edits v00's handle again: the pending design
+    // is v02, and it must build on v00's frame. "v02 builds on v01" would duplicate the frame that regressed.
+    const runDir = seed([
+      { ...shot(0), doc: doc(1), screenId: "1:1" },
+      { ...shot(1), doc: doc(1), screenId: "2:2" },
+    ]);
+    const cursor: RoundCursor = { index: -1 };
+    const gen = resumingGenerator({ runDir, inner: figmaLike(), cursor });
+    const v00 = await gen.generate("p0");
+    await v00.edit("p1"); // replays v01
+    const err = (await v00.edit("p2").catch((e: unknown) => e)) as DesignPending;
+    expect(err).toBeInstanceOf(DesignPending);
+    expect(err.version).toBe("v02");
+    expect(err.parentVersion).toBe("v00");
+    expect(err.parentNodeId).toBe("1:1");
+    expect(cursor.index).toBe(2);
+  });
+
+  it("passes any other failure through untouched", async () => {
+    const runDir = mkdtempSync(join(tmpdir(), "dl-resume-"));
+    const inner: Generator = { generate: async () => { throw new Error("boom"); }, variants: async () => [] };
+    await expect(resumingGenerator({ runDir, inner, cursor: { index: -1 } }).generate("p")).rejects.toThrow(/^boom$/);
   });
 });
 

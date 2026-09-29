@@ -8,6 +8,7 @@ import { decide, type RoundRecord, type StopReason } from "../scoring/stop.js";
 import { distill } from "../distill/distill.js";
 import { runCommittee, type LlmClient } from "../critics/llm.js";
 import { WorkOrderPending } from "../critics/agent.js";
+import { DesignPending } from "../figma/generator.js";
 import { chair, type ChairClient } from "../chair/chair.js";
 import { selectCandidate, type CandidateRow } from "./candidates.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
@@ -481,7 +482,9 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     // a manifest here would finalise it, and a finalised run refuses every later write — the resumed step
     // could never score the round it is waiting for. This must come before the `rounds.length` test: from
     // round 1 on there ARE rounds, so a suspension would otherwise be recorded as an aborted run.
-    if (err instanceof WorkOrderPending) throw err;
+    // A Figma edit waiting on the operator is the same kind of suspension: round 0's design work escapes only
+    // because `agentRoundZero` runs outside this try, and every later round's edit lands here.
+    if (err instanceof WorkOrderPending || err instanceof DesignPending) throw err;
     // With no version written there is nothing to keep, so the failure is the caller's to see.
     if (rounds.length === 0) throw err;
     stopReason = "aborted";

@@ -6,6 +6,7 @@ import { mkdirSync } from "node:fs";
 import { runScreen, type RunOptions } from "../../src/cli/run.js";
 import { recordProgress } from "../helpers/recordProgress.js";
 import { FakeGenerator, type Generator } from "../../src/stitch/adapter.js";
+import { DesignPending } from "../../src/figma/generator.js";
 import { reserve, MONTHLY_LIMIT } from "../../src/stitch/quota.js";
 import type { CriticInput, LlmClient } from "../../src/critics/llm.js";
 import type { ChairClient, ChairInput } from "../../src/chair/chair.js";
@@ -254,6 +255,31 @@ describe("runScreen", () => {
     const m = manifest(dir);
     expect(m.stopReason).toBe("aborted");
     expect(m.abortReason).toMatch(/script exhausted/);
+    expect(existsSync(join(runDir(dir), "v00", "screen.png"))).toBe(true);
+  });
+
+  it("treats a Figma design suspension in an edit round as a suspension, not an abort", async () => {
+    // v00 scores 70, so the loop asks for an edit — and a Figma edit can only be handed back, never done.
+    // Before the fix this was recorded as stopReason "aborted" with a manifest, which finalised the run so
+    // that no later `step` could ever resume it.
+    const dir = setup();
+    const inner = new FakeGenerator([shot(30)]);
+    const generator: Generator = {
+      generate: async (prompt) => {
+        const s = await inner.generate(prompt);
+        return {
+          id: s.id,
+          edit: async (p) => { throw new DesignPending(p, s.id); },
+          getHtml: () => s.getHtml(),
+          getImage: () => s.getImage(),
+        };
+      },
+      variants: (seed, prompt, o) => inner.variants(seed, prompt, o),
+    };
+    await expect(
+      runScreen({ designDir: dir, screen: "home", date: DATE, generator, llm: llmOf([70]).llm, chairClient: chairOf().client }),
+    ).rejects.toBeInstanceOf(DesignPending);
+    expect(existsSync(join(runDir(dir), "manifest.json"))).toBe(false);
     expect(existsSync(join(runDir(dir), "v00", "screen.png"))).toBe(true);
   });
 

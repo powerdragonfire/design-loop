@@ -11,6 +11,9 @@ import { loadContract } from "../contract/load.js";
 import { AnthropicLlmClient, type LlmClient } from "../critics/llm.js";
 import { buildReport, captureApproval } from "../report/report.js";
 import { createStitchGenerator, type Generator } from "../stitch/adapter.js";
+import { createFigmaClient } from "../figma/client.js";
+import { FigmaGenerator, figmaMeasure } from "../figma/generator.js";
+import type { Config, MeasuredDoc } from "../types.js";
 import { defaultAgentsDir, syncAgents } from "./agents.js";
 import { abDistiller, calibrate } from "./calibrate.js";
 import { inspectVersion } from "./inspect.js";
@@ -30,7 +33,13 @@ export interface Deps {
   calibrate: typeof calibrate;
   abDistiller: typeof abDistiller;
   smoke: typeof smoke;
-  makeGenerator(): Generator;
+  /** The generator a run uses. Given the design folder's config it picks Stitch or Figma; without one, Stitch. */
+  makeGenerator(config?: Config): Generator;
+  /**
+   * The measure a run uses, when it is not the default Chromium render. Figma frames are serialised node trees,
+   * not HTML, so a Figma run measures them natively. Optional so a test's Deps need not supply it.
+   */
+  makeMeasure?(config?: Config): ((html: string) => Promise<MeasuredDoc>) | undefined;
   makeLlm(): LlmClient;
   makeChair(): ChairClient;
   /** The committee's top-ranked version of a finalised run. */
@@ -92,14 +101,18 @@ export function defaultDeps(designDir: string, io: Io, progress: Progress = noPr
     calibrate,
     abDistiller,
     smoke,
-    makeGenerator: () =>
-      createStitchGenerator({
-        quotaDir: designDir,
-        onRetry: (r) => progress.warn(`stitch ${r.what} failed, attempt ${r.attempt} of ${r.of} in ${r.waitMs / 1000}s: ${r.error.split("\n")[0]!.slice(0, 100)}`),
-        // What was asked for, not only what came back: a generation is slow and expensive, and the prompt
-        // is the one input worth seeing while waiting on it.
-        onPrompt: (pr) => { for (const line of promptLines(pr.what, pr.prompt, mode)) progress.info(line); },
-      }),
+    makeGenerator: (config) =>
+      config?.generator === "figma"
+        // The token comes from FIGMA_TOKEN, never config; createFigmaClient names it if it is missing.
+        ? new FigmaGenerator({ client: createFigmaClient({ fileKey: config.figma?.fileKey }) })
+        : createStitchGenerator({
+            quotaDir: designDir,
+            onRetry: (r) => progress.warn(`stitch ${r.what} failed, attempt ${r.attempt} of ${r.of} in ${r.waitMs / 1000}s: ${r.error.split("\n")[0]!.slice(0, 100)}`),
+            // What was asked for, not only what came back: a generation is slow and expensive, and the prompt
+            // is the one input worth seeing while waiting on it.
+            onPrompt: (pr) => { for (const line of promptLines(pr.what, pr.prompt, mode)) progress.info(line); },
+          }),
+    makeMeasure: (config) => (config?.generator === "figma" ? figmaMeasure() : undefined),
     makeLlm: () => new AnthropicLlmClient(),
     makeChair: () => new AnthropicChairClient(),
     async committeePick(runDir) {
@@ -196,9 +209,18 @@ async function approve(d: Deps, io: Io, runDir: string, id: string, known?: stri
  * agent-mode run has no reason to hold, which is the very dead end the branch below exists to avoid.
  */
 async function isAgentMode(designDir: string): Promise<boolean> {
-  if (!existsSync(join(designDir, "config.json"))) return false;
+  return (await readConfig(designDir))?.criticMode === "agent";
+}
+
+/**
+ * The design folder's config, or null when there is no config.json at all — the one absence that is tolerated,
+ * so `step <runDir>` still works from a folder that has none. Anything else wrong with the contract throws, for
+ * the reason `isAgentMode` gives: failing open would mis-route the run and misreport the error.
+ */
+async function readConfig(designDir: string): Promise<Config | null> {
+  if (!existsSync(join(designDir, "config.json"))) return null;
   const { config } = await loadContract(designDir, {}, undefined, { allowNullSigma: true });
-  return config.criticMode === "agent";
+  return config;
 }
 
 /**
@@ -211,16 +233,26 @@ async function stepCommand(
 ): Promise<number> {
   // A resumed run says which screen and date it is for; only the first step is told.
   const identity = runDir === undefined ? { screen: screen!, date: date! } : await d.runIdentity(runDir);
+  const config = (await readConfig(designDir)) ?? undefined;
+  const figma = config?.generator === "figma";
   const out = await d.stepRun({
-    designDir, ...identity, runDir, generator: d.makeGenerator(), log: (line) => io.out(line), progress,
+    designDir, ...identity, runDir, generator: d.makeGenerator(config), log: (line) => io.out(line), progress,
     // Every real agent-mode run checks its agent files; only `stepRun`'s own unit tests, which construct
     // this option directly, ever leave it unset.
     agentsDir,
+    // Only a Figma run adds these, so a Stitch step is called exactly as it always was.
+    ...(figma ? { measure: d.makeMeasure?.(config), snapshotDesigns: true, figma: config.figma } : {}),
   });
   if (!out.done) {
     io.out(`Run: ${out.runDir}`);
     io.out(`Work order: ${out.workOrder}`);
-    io.out(`Dispatch the agents it names, then: design-loop step ${out.runDir}`);
+    if (out.kind === "design") {
+      // No subagent can do this one: none of them can reach Figma.
+      io.out("Build the frame in Figma as the order says (for an edit: duplicate, never edit in place),");
+      io.out(`write its node id to the file the order names, then: design-loop step ${out.runDir}`);
+    } else {
+      io.out(`Dispatch the agents it names, then: design-loop step ${out.runDir}`);
+    }
     return 10;
   }
   // The summary first, then the report, for the reason runCommand gives: a failing report must not cost the

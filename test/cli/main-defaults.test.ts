@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,11 +9,37 @@ vi.mock("../../src/stitch/adapter.js", () => ({ createStitchGenerator: vi.fn(() 
 vi.mock("../../src/contract/load.js", () => ({ loadContract: vi.fn(async () => ({ config: { models: { critic: "claude-sonnet-5" } } })) }));
 
 const { defaultDeps } = await import("../../src/cli/main.js");
+const { FigmaGenerator } = await import("../../src/figma/generator.js");
 const { createStitchGenerator } = await import("../../src/stitch/adapter.js");
 const io = { out: () => {}, err: () => {} };
 
 describe("production defaults", () => {
   beforeEach(() => { countTokens.mockReset(); });
+
+  describe("the Figma generator", () => {
+    const figmaConfig = { generator: "figma", figma: { fileKey: "KEY" } } as never;
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it("is built for a Figma config, with the token read from the environment", () => {
+      vi.stubEnv("FIGMA_TOKEN", "figd_test");
+      vi.mocked(createStitchGenerator).mockClear();
+      expect(defaultDeps("design", io).makeGenerator(figmaConfig)).toBeInstanceOf(FigmaGenerator);
+      expect(createStitchGenerator).not.toHaveBeenCalled();
+    });
+
+    it("names FIGMA_TOKEN when it is missing, never a value", () => {
+      vi.stubEnv("FIGMA_TOKEN", "");
+      vi.stubEnv("FIGMA_ACCESS_TOKEN", "");
+      expect(() => defaultDeps("design", io).makeGenerator(figmaConfig)).toThrow(/FIGMA_TOKEN is not set/);
+    });
+
+    it("measures natively for Figma and leaves the default for Stitch", () => {
+      const deps = defaultDeps("design", io);
+      expect(typeof deps.makeMeasure?.(figmaConfig)).toBe("function");
+      expect(deps.makeMeasure?.({ generator: "stitch" } as never)).toBeUndefined();
+      expect(deps.makeMeasure?.()).toBeUndefined();
+    });
+  });
 
   it("preflight counts tokens on the configured critic model", async () => {
     countTokens.mockResolvedValue({ input_tokens: 8 });

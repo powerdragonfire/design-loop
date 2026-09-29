@@ -1,4 +1,6 @@
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { DesignPending } from "../figma/generator.js";
 import { AgentChairClient } from "../chair/agent.js";
 import { AgentLlmClient, WorkOrderPending } from "../critics/agent.js";
 import { LLM_CRITICS } from "../critics/llm.js";
@@ -30,11 +32,15 @@ export interface StepOptions {
    * needs the check.
    */
   agentsDir?: string;
+  /** Figma runs only: the file and page a design work order points the operator at. */
+  figma?: { fileKey: string; pageId?: string };
 }
 
 export type StepResult =
   | { done: true; result: RunResult; runDir: string }
-  | { done: false; workOrder: string; runDir: string };
+  // `kind` is optional so a caller that only needs the order's path — and the tests that mock this — need not
+  // say which kind it is. A dispatcher that has to tell a design order from a critic order reads it.
+  | { done: false; workOrder: string; runDir: string; kind?: "critics" | "chair" | "design" };
 
 /**
  * One subagent's job: which agent type to dispatch, what it may read, and the one file it must write. Paths
@@ -118,6 +124,70 @@ export async function writeWorkOrder(opts: {
 }
 
 /**
+ * The work order for a frame that has to be built or edited in Figma. Unlike a critic or chair order it names
+ * no subagent: `design-loop-*` agents get Read/Grep/Glob/Write and no Figma access, so the only one who can do
+ * this unit is the session driving the loop, which has the Figma MCP.
+ *
+ * The version directory is created here because nothing else has claimed it yet — the generator suspended
+ * before the round could write anything — and both halves need it: `writeAtomic` does not create directories,
+ * and `openExistingRun` refuses a run that holds no `vNN/` at all, so without it the next `step` could not
+ * reopen a run suspended on its very first design. A directory with no `composite.json` is exactly the suspend
+ * state `resumingRun.openVersion` adopts.
+ */
+export async function writeDesignOrder(opts: {
+  runDir: string; designDir: string; screen: string; pending: DesignPending;
+  figma?: { fileKey: string; pageId?: string };
+}): Promise<string> {
+  const { runDir, designDir, screen, pending } = opts;
+  const { version, parentVersion } = pending;
+  if (version === undefined) {
+    throw new Error("BUG: a design work order reached step without a version; the resume layer stamps it");
+  }
+  await mkdir(join(runDir, version), { recursive: true });
+  await writeAtomic(join(runDir, version, "design-prompt.txt"), `${pending.prompt}\n`);
+
+  const output = rel(version, "screen-id.txt");
+  const editing = pending.parentNodeId !== null;
+  const instruction = editing
+    ? `Duplicate frame ${pending.parentNodeId} and apply designPrompt to the COPY. Never edit ${pending.parentNodeId} ` +
+      "in place: after a regression the loop builds from that frame again, and an in-place edit destroys it. " +
+      `Then write the copy's node id to ${output}.`
+    : `Build a new frame${opts.figma?.pageId ? ` on page ${opts.figma.pageId}` : ""} from designPrompt, following ` +
+      `screenSpec, brief and tokens. Then write its node id to ${output}.`;
+
+  const file = join(runDir, version, "work-order.json");
+  await writeAtomic(file, `${JSON.stringify({
+    kind: "design",
+    version,
+    screen,
+    designDir: resolve(designDir),
+    runDir: resolve(runDir),
+    concurrency: 1,
+    figma: opts.figma ?? null,
+    instruction,
+    // One plain frame id per file, e.g. 2047:3389 (a Figma link's 2047-3389 is accepted too). The next `step`
+    // reads that frame from Figma; until the file exists it simply writes this order again.
+    idFormat: "123:456",
+    units: [{
+      critic: "design",
+      // Not a subagent: none of them can reach Figma. The orchestrating session does this unit itself.
+      agent: null,
+      output,
+      inputs: {
+        designPrompt: rel(version, "design-prompt.txt"),
+        screenSpec: `screens/${screen}.md`,
+        brief: "brief.md",
+        tokens: "tokens.json",
+        editFrom: pending.parentNodeId,
+        editFromVersion: parentVersion ?? null,
+        editFromScreenshot: parentVersion ? rel(parentVersion, "screen.png") : null,
+      },
+    }],
+  }, null, 2)}\n`);
+  return file;
+}
+
+/**
  * Advances a run by one suspension. Everything already on disk is replayed for free; the first step that needs
  * an answer nobody has written stops and says what to dispatch.
  *
@@ -168,7 +238,16 @@ export async function stepRun(opts: StepOptions): Promise<StepResult> {
           );
         }
       }
-      return { done: false, workOrder: await writeWorkOrder({ runDir, designDir, screen, pending: err }), runDir };
+      return { done: false, kind: err.kind, workOrder: await writeWorkOrder({ runDir, designDir, screen, pending: err }), runDir };
+    }
+    // No staleness check: a design order names no agent file, so there is nothing that could be out of date.
+    if (err instanceof DesignPending) {
+      return {
+        done: false,
+        kind: "design",
+        workOrder: await writeDesignOrder({ runDir, designDir, screen, pending: err, figma: opts.figma }),
+        runDir,
+      };
     }
     // Deliberately no `llm.throwIfPending()` here. `runScreen` already calls it the moment the committee
     // settles, so anything else reaching this point is a real failure, and raising a work order over it would

@@ -60,6 +60,13 @@ export interface Config {
   };
   /** Where critiques come from: the Anthropic API, or files written by Claude Code subagents. */
   criticMode: "api" | "agent";
+  /**
+   * Where screens come from. Optional on the type so a hand-built Config (tests, older callers) still reads as
+   * Stitch; `loadContract` always fills it in.
+   */
+  generator?: "stitch" | "figma";
+  /** The Figma file a Figma run reads frames from, and the page new frames go on. The token is FIGMA_TOKEN. */
+  figma?: { fileKey: string; pageId?: string };
 }
 
 export interface Contract {

@@ -33,6 +33,16 @@ const ConfigSchema = z.strictObject({
     })
     .default({ families: 1, variantsPerFamily: 0, creativeRange: "EXPLORE", aspects: [] }),
   criticMode: z.enum(["api", "agent"]).default("api"),
+  // Where screens come from. Stitch generates from a prompt; Figma cannot be written from a CLI at all, so a
+  // Figma run hands each generation and edit back to the driving session as a design work order.
+  generator: z.enum(["stitch", "figma"]).default("stitch"),
+  // Not secret: the token lives in FIGMA_TOKEN, never here. `pageId` is where the operator puts new frames.
+  figma: z
+    .strictObject({
+      fileKey: z.string().min(1),
+      pageId: z.string().min(1).optional(),
+    })
+    .optional(),
 });
 
 const WEIGHT_EPSILON = 1e-9;
@@ -134,6 +144,21 @@ export async function loadContract(
         `candidates.variantsPerFamily (${variantsPerFamily}) ask for ${candidates}. ` +
         `Set "families": 1 and "variantsPerFamily": 0, or use "criticMode": "api".`,
     );
+  }
+
+  // A Figma run suspends for every generation and edit, and only the step path can suspend: it is agent mode's
+  // machinery (work orders, the round cursor, the resume layer). An API-mode run would call the generator,
+  // get a DesignPending it has no way to hand back, and abort.
+  if (config.generator === "figma") {
+    if (config.criticMode !== "agent") {
+      throw new Error(
+        'the Figma generator runs in agent mode: design work is handed back to Claude Code through work orders, ' +
+          'which only the step path can write. Set "criticMode": "agent".',
+      );
+    }
+    if (!config.figma) {
+      throw new Error('the Figma generator needs a "figma" block naming the file: { "fileKey": "…", "pageId": "…" }');
+    }
   }
 
   if (config.sigma === null && !opts.allowNullSigma) {

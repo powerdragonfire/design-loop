@@ -71,6 +71,24 @@ If the new agent types are not yet available to you, tell the user they may need
    `nextIssueId`, and nothing else. Dispatch at most `concurrency` at a time. Wait for all of them, then go
    back to 1.
 
+**The one exception: a `"kind": "design"` order is yours to do, not a subagent's.** It appears only when
+`config.json` has `"generator": "figma"`. Its single unit has `"agent": null` because no `design-loop-*`
+agent can reach Figma — you can, through the Figma MCP. Load the `figma-use` skill (and `figma-generate-design`)
+before touching the file, and follow the order's `instruction`:
+
+- **First generation** (`editFrom` is null): build a new frame on the order's `figma.pageId` from
+  `designPrompt`, following `screenSpec`, `brief` and `tokens`. Reuse the file's existing variables, text
+  styles and components before drawing anything new.
+- **Edit** (`editFrom` is a node id): **duplicate** that frame and apply `designPrompt` — the chair's edit — to
+  the COPY. Never edit `editFrom` in place: after a regression the loop builds from it again. `editFromVersion`
+  and `editFromScreenshot` tell you which version you are building on; after a regression that is the best
+  version, not the latest.
+- Write the new frame's node id — one plain id, `123:456` — to the unit's `output` (`vNN/screen-id.txt`), then
+  `dl step`. Recording an id is the one file you write in a Figma run; it is the design, not a judgement of it.
+
+`step` reads the frame straight from Figma (needs `FIGMA_TOKEN`) and refuses an id equal to `editFrom`. If it
+exits 1 naming the id, fix `screen-id.txt` and step again — nothing was finalised.
+
 Paths in a work order are relative to `runDir` (or to `designDir` for `brief.md`, `tokens.json` and
 `screens/`), both of which the file gives as absolute paths. An input with the value `null` is one this
 agent is deliberately not shown — do not go and find it.
@@ -117,6 +135,8 @@ you, or the committee's pick, is not approval.
 - Edit `tokens.json`, `config.json` weights, or a screen spec to make a gate pass. If the gate fails, report why.
 - Retry a failed run in a loop. Every retry spends money and Stitch quota.
 - Write, edit or repair a file under `runs/<run>/vNN/inbox/`. That is an agent's answer, not yours.
+- In a Figma run, edit a design order's `editFrom` frame in place, or record the id of a frame you did not
+  build for that order. The critics score whatever frame the id names.
 - Re-run `dl step` while subagents are still working: it would write a work order for critics that are
   about to answer.
 

@@ -14,6 +14,9 @@ side so you pick the version you want. Nothing is approved automatically.
 - Stitch credentials: either `STITCH_API_KEY`, or both `STITCH_ACCESS_TOKEN` and `GOOGLE_CLOUD_PROJECT`.
   Plus `STITCH_PROJECT_ID`, the project generations land in.
 - Anthropic credentials: `ANTHROPIC_API_KEY`, or a profile you have logged into with `ant auth login`.
+- Designing in Figma instead (see [Designing in Figma](#designing-in-figma-instead-of-stitch)): a Figma
+  personal access token with the read-only scope `file_content:read`, as `FIGMA_TOKEN`. No Stitch or
+  Anthropic credentials are needed for a Figma run.
 
 Run everything as `pnpm design-loop <command>`.
 
@@ -25,7 +28,8 @@ Default `design/`, or pass `--design <dir>`. `test/fixtures/design/` is a workin
 design/
   config.json          sigma, maxRounds, convergence, model names, critic weights (must sum to 1.0),
                        criticMode ("api": this process calls Anthropic directly, or "agent": critiques
-                       and chair verdicts come from Claude Code subagents instead)
+                       and chair verdicts come from Claude Code subagents instead), generator ("stitch",
+                       the default, or "figma") and, for Figma, figma: { fileKey, pageId }
   tokens.json          your design tokens: W3C DTCG ($value) or bare leaves both work
   brief.md             the product brief every critic is given
   screens/<name>.md    one spec per screen; `run <name>` needs screens/<name>.md
@@ -80,6 +84,55 @@ as before.
 | --- | --- | --- |
 | Stitch generations | 1 + up to `maxRounds` | 6 + up to `maxRounds` |
 | Cost per screen | ~$1.06 | ~$2.30 |
+
+## Designing in Figma instead of Stitch
+
+Set `"generator": "figma"` and the loop builds each version as a frame in your own Figma file, bound to
+your own design system, instead of asking Stitch to generate HTML. Everything after generation — measurement,
+the committee, the chair, the stopping rule, the report — is unchanged.
+
+```json
+"criticMode": "agent",
+"generator": "figma",
+"figma": { "fileKey": "Hd1q4ePvrHOmZerZZNmk9b", "pageId": "266:2" },
+"candidates": { "families": 1, "variantsPerFamily": 0 }
+```
+
+**Nothing here can create a frame for you.** Figma's REST API is read-only for designs; creating and editing
+frames is the Plugin API, which runs inside Figma. So a Figma run suspends for every generation and edit,
+exactly as agent mode suspends for critiques, and the session driving the loop (Claude Code with the Figma
+MCP) does the design work:
+
+```
+run settings       → work order kind "design" → exit 10
+                     build the frame; write its node id to v00/screen-id.txt
+step <runDir>      → reads the frame from Figma, measures it, suspends on the critics → exit 10
+                     dispatch the critics; step; dispatch the chair; step
+step <runDir>      → work order kind "design" for v01 → exit 10
+                     DUPLICATE the frame it names, apply the edit to the copy, record the copy's id
+step <runDir>      → … until exit 0
+```
+
+What the design work order asks, and what `step` enforces:
+
+- **One plain frame id per `screen-id.txt`**, `123:456`. A Figma link's `123-456` is accepted too.
+- **Duplicate, never edit in place.** After a regression the loop builds from the best version's frame
+  again, so an in-place edit would destroy it. `step` refuses an id equal to the order's `editFrom`.
+- **The frame is read once and frozen.** Before the loop runs, `step` fetches each newly recorded frame and
+  writes its node tree and PNG into the version directory. A mistyped id or a Figma outage fails that `step`
+  plainly (exit 1, nothing finalised): correct the id and step again. A later tweak in Figma never changes
+  what an earlier version was scored on.
+
+Differences from a Stitch run:
+
+- **Agent mode only**, so one candidate only, and it costs no Stitch quota and no Anthropic credit.
+- **The frame is measured from Figma's own node tree**, not by rendering HTML in Chromium, so bounds, fills,
+  font sizes and radii are exact, and selectors are Figma node ids — stable across rounds, so the critics'
+  hallucination rate drops. The critics' `html` input is that node tree as JSON.
+- **Tap-target and safe-area checks need to know what is tappable.** A node counts if it has a prototype
+  interaction, or if its layer, its main component or its component set is named like a control (button,
+  link, tab, toggle, switch, chip, action, row, field, input, cta). Name your components that way, or those
+  two checks will not see them.
 
 ## Watching a run
 
@@ -149,6 +202,10 @@ than `~/Projects/design-loop`, set `DESIGN_LOOP_HOME`.
 
 ## Known limits in v1
 
+- **A Figma run reuses the Stitch calibration.** `calibrate`, `smoke` and `ab-distiller` still render
+  Stitch HTML in Chromium, so a Figma run's sigma is whatever the folder was calibrated at. Agent mode already
+  warns that it is uncalibrated; the same caveat applies with more force, since the page being measured is a
+  different kind of artefact.
 - **Spacing literals are not token-checked.** Only colour, font size and border radius are compared against
   `tokens.json`; padding and margin are measured but never flagged.
 - **`batchMode: true` is rejected at load.** Batch critiquing is not implemented.

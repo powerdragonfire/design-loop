@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FigmaClient, type FetchLike, type FetchResponse } from "../../src/figma/client.js";
-import { DesignPending, FigmaGenerator, figmaMeasure, versionName } from "../../src/figma/generator.js";
+import { DesignPending, FigmaGenerator, figmaMeasure, normaliseNodeId } from "../../src/figma/generator.js";
 import type { FigmaNode } from "../../src/figma/serialise.js";
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(8)]);
@@ -90,19 +90,26 @@ describe("FigmaGenerator", () => {
     const err = await gen(fetch).generate("Design a settings screen").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DesignPending);
     const d = err as DesignPending;
-    expect(d.version).toBe("v00");
+    // The generator does not know the round; the resume layer stamps it.
+    expect(d.version).toBeUndefined();
     expect(d.parentNodeId).toBeNull();
     expect(d.prompt).toBe("Design a settings screen");
   });
 
-  it("suspends on edit, naming the node to edit and the next version", async () => {
+  it("suspends on edit, naming the node to duplicate", async () => {
     const { fetch } = stubFetch({});
     const screen = gen(fetch).fromId("1:1");
     const err = await screen.edit("Make the toggle 44pt").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DesignPending);
     const d = err as DesignPending;
-    expect(d.version).toBe("v01");
+    expect(d.version).toBeUndefined();
     expect(d.parentNodeId).toBe("1:1");
+    expect(d.message).toMatch(/duplicate 1:1 in Figma and edit the copy/);
+  });
+
+  it("accepts a node id pasted from a Figma link and normalises it", async () => {
+    const { fetch } = stubFetch({});
+    expect(gen(fetch).fromId("1-1").id).toBe("1:1");
   });
 
   it("refuses multiple candidates, the same way agent mode does", async () => {
@@ -152,8 +159,26 @@ describe("figmaMeasure", () => {
   });
 });
 
-describe("versionName", () => {
-  it("pads to the store's vNN convention", () => {
-    expect([0, 1, 10].map(versionName)).toEqual(["v00", "v01", "v10"]);
+describe("DesignPending.at", () => {
+  it("stamps the version and parent without losing the prompt or node", () => {
+    const d = new DesignPending("make it bigger", "7:7").at("v03", "v01");
+    expect(d.version).toBe("v03");
+    expect(d.parentVersion).toBe("v01");
+    expect(d.prompt).toBe("make it bigger");
+    expect(d.parentNodeId).toBe("7:7");
+    expect(d.message).toContain("for v03");
+  });
+});
+
+describe("normaliseNodeId", () => {
+  it("accepts both separators and trims", () => {
+    expect(normaliseNodeId(" 2047-3389 ")).toBe("2047:3389");
+    expect(normaliseNodeId("2047:3389")).toBe("2047:3389");
+  });
+
+  it("refuses anything that is not a frame id, spelling out the format", () => {
+    for (const bad of ["", "abc", "2047", "I2047:3389;1:2", "https://figma.com/x"]) {
+      expect(() => normaliseNodeId(bad)).toThrow(/expected the form 123:456/);
+    }
   });
 });

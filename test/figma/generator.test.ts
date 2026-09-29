@@ -159,7 +159,7 @@ describe("figmaMeasure", () => {
   it("satisfies the measure seam and never touches Chromium", async () => {
     const doc = await figmaMeasure()(JSON.stringify(NODE));
     expect(doc.viewport).toEqual({ w: 390, h: 800 });
-    expect(doc.nodes.map((n) => n.selector)).toEqual(["1:2"]);
+    expect(doc.nodes.map((n) => n.selector)).toEqual(["Sign_out_Button"]);
     // frame-relative, not the canvas x=100
     expect(doc.nodes[0]!.bbox.x).toBe(0);
   });

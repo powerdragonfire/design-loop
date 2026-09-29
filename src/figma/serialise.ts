@@ -110,8 +110,8 @@ export function isInteractive(node: FigmaNode, names: ComponentNames = {}): bool
   return set !== undefined && INTERACTIVE_NAME.test(set.name);
 }
 
-function tagOf(node: FigmaNode, names: ComponentNames): string {
-  if (isInteractive(node, names)) return "button";
+/** The tag a node has when it is not the control: interactivity is decided by the walk, not per node. */
+function baseTag(node: FigmaNode): string {
   if (node.type === "TEXT") return "span";
   if (CONTAINER_TYPES.has(node.type)) return "div";
   return node.type.toLowerCase();
@@ -128,15 +128,24 @@ export interface SerialiseOptions extends ComponentNames {
   rootBackground?: string;
 }
 
+/** A layer name as one whitespace-free selector segment: distill prints the selector as a line's first token. */
+const segment = (node: FigmaNode): string => node.name.trim().replace(/\s+/g, "_") || node.type.toLowerCase();
+
 /**
  * Turns a Figma frame into the same `MeasuredDoc` the Chromium path produces, so every downstream
  * consumer — distill, the deterministic critic, evidence validation, inspect, the report — works
  * unchanged.
  *
- * Two properties matter more than completeness. `selector` must be unique and stable across rounds:
- * Figma node ids are both, which is strictly better than the positional CSS paths the HTML path falls
- * back to on pages without ids. And `effectiveBackground` must be resolved here, because MeasuredDoc
- * has no parent links and the contrast check cannot walk ancestors itself.
+ * `selector` must be unique and STABLE ACROSS ROUNDS: the store tracks issues by id and deterministic ids
+ * embed the selector, evidence is validated against it, and a resolution is verified by comparing the same
+ * selector before and after. Node ids are not stable here — every round is a duplicate of the last, and a
+ * duplicate gets fresh ids — so the selector is the path of layer names from the root, which duplication
+ * preserves (`Content>Tile_grid>Tile_/_Notifications>Content>Switch_row_/_Push`). Siblings sharing a name
+ * are told apart by their order among those siblings (`Frame[1]`). Renaming a layer changes its path, which
+ * is honest: it is then a different element.
+ *
+ * `effectiveBackground` is resolved here because a check cannot walk ancestors from a single node, and
+ * `parent` names the nearest emitted ancestor so checks that compare siblings can group them.
  */
 export function serialise(root: FigmaNode, opts: SerialiseOptions = {}): MeasuredDoc {
   const box = root.absoluteBoundingBox;
@@ -145,7 +154,12 @@ export function serialise(root: FigmaNode, opts: SerialiseOptions = {}): Measure
   const viewport = opts.viewport ?? { w: Math.round(box?.width ?? 0), h: Math.round(box?.height ?? 0) };
   const nodes: MeasuredNode[] = [];
 
-  const walk = (node: FigmaNode, depth: number, inheritedBg: string): void => {
+  /**
+   * `path` is this node's selector. `parent` is the nearest ancestor that was emitted. `inControl` is true
+   * inside something already counted as a control: nested controls are one tap target, the outermost, so
+   * an inner "Button" inside a 44pt "Leading action" is not measured again as a separate, smaller target.
+   */
+  const walk = (node: FigmaNode, path: string, parent: string | undefined, depth: number, inheritedBg: string, inControl: boolean): void => {
     if (node.visible === false) return;
 
     const own = solidFill(node);
@@ -157,9 +171,11 @@ export function serialise(root: FigmaNode, opts: SerialiseOptions = {}): Measure
     const effectiveBg = ownBackground ?? inheritedBg;
 
     const b = node.absoluteBoundingBox;
+    const control = !inControl && isInteractive(node, opts);
     // Zero-area nodes are dropped exactly as the DOM path drops zero-area rects: they cannot be seen,
     // cited, or tapped, and they would dilute the hallucination rate with unciteable selectors.
-    if (b && b.width > 0 && b.height > 0) {
+    const emitted = !!(b && b.width > 0 && b.height > 0);
+    if (b && emitted) {
       const style: Record<string, string> = {};
       const text = node.characters ?? "";
 
@@ -175,9 +191,10 @@ export function serialise(root: FigmaNode, opts: SerialiseOptions = {}): Measure
       if (node.opacity !== undefined && node.opacity < 1) style["opacity"] = String(Number(node.opacity.toFixed(3)));
 
       nodes.push({
-        selector: node.id,
-        tag: tagOf(node, opts),
-        role: isInteractive(node, opts) ? "button" : null,
+        selector: path,
+        ...(parent !== undefined ? { parent } : {}),
+        tag: control ? "button" : baseTag(node),
+        role: control ? "button" : null,
         text,
         bbox: {
           x: Number((b.x - originX).toFixed(2)),
@@ -190,12 +207,25 @@ export function serialise(root: FigmaNode, opts: SerialiseOptions = {}): Measure
       });
     }
 
-    for (const child of node.children ?? []) walk(child, depth + 1, effectiveBg);
+    walkChildren(node, path, emitted ? path : parent, depth + 1, effectiveBg, inControl || control);
+  };
+
+  const walkChildren = (node: FigmaNode, path: string | null, parent: string | undefined, depth: number, bg: string, inControl: boolean): void => {
+    // Every child counts towards a name's occurrence index, hidden or not, so hiding one layer does not
+    // renumber its siblings between rounds.
+    const seen = new Map<string, number>();
+    for (const child of node.children ?? []) {
+      const seg = segment(child);
+      const n = seen.get(seg) ?? 0;
+      seen.set(seg, n + 1);
+      const own = n === 0 ? seg : `${seg}[${n}]`;
+      walk(child, path === null ? own : `${path}>${own}`, parent, depth, bg, inControl);
+    }
   };
 
   // The root frame itself is the canvas, not a node in it — the DOM path does not emit <body> either.
   const rootBg = solidFill(root) ?? opts.rootBackground ?? "rgb(255, 255, 255)";
-  for (const child of root.children ?? []) walk(child, 0, rootBg);
+  walkChildren(root, null, undefined, 0, rootBg, false);
 
   return { viewport, nodes };
 }

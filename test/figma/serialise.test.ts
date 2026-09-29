@@ -42,15 +42,61 @@ describe("serialise", () => {
     expect(doc.viewport).toEqual({ w: 393, h: 852 });
   });
 
-  it("uses the Figma node id as the selector, so selectors are unique and stable", () => {
+  it("uses the layer-name path as the selector, unique within the frame", () => {
     const doc = serialise(
       frame([
         { id: "1:1", name: "A", type: "FRAME", absoluteBoundingBox: { x: 15445, y: 0, width: 10, height: 10 } },
         { id: "1:2", name: "B", type: "FRAME", absoluteBoundingBox: { x: 15445, y: 20, width: 10, height: 10 } },
       ]),
     );
-    expect(doc.nodes.map((n) => n.selector)).toEqual(["1:1", "1:2"]);
+    expect(doc.nodes.map((n) => n.selector)).toEqual(["A", "B"]);
     expect(new Set(doc.nodes.map((n) => n.selector)).size).toBe(doc.nodes.length);
+  });
+
+  it("gives a duplicated frame the same selectors, though every node id changed", () => {
+    // Each round is a duplicate of the last, and a duplicate gets fresh ids. The store tracks issues by
+    // selector-derived ids, so selectors must survive duplication or nothing can be tracked across rounds.
+    const tree = (a: string, b: string, c: string): FigmaNode => frame([
+      { id: a, name: "Tile grid", type: "FRAME", absoluteBoundingBox: { x: 15445, y: 0, width: 350, height: 200 },
+        children: [
+          { id: b, name: "Tile / Account", type: "FRAME", absoluteBoundingBox: { x: 15445, y: 0, width: 169, height: 166 } },
+          { id: c, name: "Tile / Albums", type: "FRAME", absoluteBoundingBox: { x: 15626, y: 0, width: 169, height: 166 } },
+        ] },
+    ]);
+    const v00 = serialise(tree("2072:1", "2072:2", "2072:3")).nodes.map((n) => n.selector);
+    const v01 = serialise(tree("2076:1", "2076:2", "2076:3")).nodes.map((n) => n.selector);
+    expect(v01).toEqual(v00);
+    expect(v00).toEqual(["Tile_grid", "Tile_grid>Tile_/_Account", "Tile_grid>Tile_/_Albums"]);
+  });
+
+  it("tells same-named siblings apart by order, and never puts whitespace in a selector", () => {
+    const doc = serialise(frame([
+      { id: "1:1", name: "Frame", type: "FRAME", absoluteBoundingBox: { x: 15445, y: 0, width: 10, height: 10 } },
+      { id: "1:2", name: "Frame", type: "FRAME", absoluteBoundingBox: { x: 15445, y: 20, width: 10, height: 10 } },
+    ]));
+    expect(doc.nodes.map((n) => n.selector)).toEqual(["Frame", "Frame[1]"]);
+    expect(doc.nodes.every((n) => !/\s/.test(n.selector))).toBe(true);
+  });
+
+  it("names each node's nearest measured ancestor as its parent", () => {
+    const doc = serialise(frame([
+      { id: "1:1", name: "Grid", type: "FRAME", absoluteBoundingBox: { x: 15445, y: 0, width: 350, height: 200 },
+        children: [{ id: "1:2", name: "Tile", type: "FRAME", absoluteBoundingBox: { x: 15445, y: 0, width: 169, height: 166 } }] },
+    ]));
+    expect(doc.nodes.find((n) => n.selector === "Grid")!.parent).toBeUndefined();
+    expect(doc.nodes.find((n) => n.selector === "Grid>Tile")!.parent).toBe("Grid");
+  });
+
+  it("measures nested controls once, at the outermost hit area", () => {
+    // The Spontai header: a 44x44 "Leading action" holding a 36x44 "Button". The tap target is the outer
+    // one; measuring the inner one too reported a blocker that did not exist.
+    const doc = serialise(frame([
+      { id: "1:1", name: "Leading action", type: "FRAME", absoluteBoundingBox: { x: 15461, y: 100, width: 44, height: 44 },
+        children: [{ id: "1:2", name: "Button", type: "FRAME", absoluteBoundingBox: { x: 15465, y: 100, width: 36, height: 44 } }] },
+    ]));
+    expect(doc.nodes.map((n) => [n.selector, n.role])).toEqual([["Leading_action", "button"], ["Leading_action>Button", null]]);
+    const { critique } = deterministicCritique(doc, {});
+    expect(critique.issues.filter((i) => i.id.startsWith("det-tap-"))).toEqual([]);
   });
 
   it("skips hidden and zero-area nodes", () => {
@@ -61,7 +107,7 @@ describe("serialise", () => {
         { id: "1:3", name: "Real", type: "FRAME", absoluteBoundingBox: { x: 15445, y: 0, width: 10, height: 10 } },
       ]),
     );
-    expect(doc.nodes.map((n) => n.selector)).toEqual(["1:3"]);
+    expect(doc.nodes.map((n) => n.selector)).toEqual(["Real"]);
   });
 
   it("resolves effectiveBackground from the nearest painted ancestor", () => {
@@ -90,7 +136,7 @@ describe("serialise", () => {
         solid(0.99, 0.976, 0.941), // canvas #fdf9f0
       ),
     );
-    const label = doc.nodes.find((n) => n.selector === "1:2")!;
+    const label = doc.nodes.find((n) => n.selector === "Card>Label")!;
     // The text paints no background of its own, so it inherits the white card, not the cream canvas.
     expect(label.style["effectiveBackground"]).toBe("rgb(255, 255, 255)");
     expect(label.style["color"]).toBe("rgb(0, 0, 0)");
@@ -165,7 +211,7 @@ describe("serialise feeds the existing pipeline unchanged", () => {
     const { critique } = deterministicCritique(doc, {});
     const tap = critique.issues.find((i) => i.id.startsWith("det-tap-"));
     expect(tap).toBeDefined();
-    expect(tap!.evidence.selector).toBe("1:1");
+    expect(tap!.evidence.selector).toBe("Toggle");
     expect(tap!.evidence.observed).toBe("48x28px");
   });
 
@@ -196,7 +242,7 @@ describe("serialise feeds the existing pipeline unchanged", () => {
     const { critique } = deterministicCritique(doc, {});
     const contrast = critique.issues.find((i) => i.id.startsWith("det-contrast-"));
     expect(contrast).toBeDefined();
-    expect(contrast!.evidence.selector).toBe("1:2");
+    expect(contrast!.evidence.selector).toBe("Segment>Label");
     expect(contrast!.evidence.observed).toMatch(/ratio 3\.8\d:1/);
   });
 
@@ -217,7 +263,7 @@ describe("serialise feeds the existing pipeline unchanged", () => {
     const text = distill(doc);
     expect(text.split("\n")[0]).toBe("viewport: 393x852");
     const line = text.split("\n")[1]!;
-    expect(line.startsWith("1:1 <span> d=0 [20,10 100x22]")).toBe(true);
+    expect(line.startsWith("Label <span> d=0 [20,10 100x22]")).toBe(true);
     expect(line).toContain('"Settings"');
     // selectors must never contain whitespace, or the digest line stops parsing for the model
     expect(doc.nodes.every((n) => !/\s/.test(n.selector))).toBe(true);

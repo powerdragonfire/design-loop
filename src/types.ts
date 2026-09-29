@@ -29,6 +29,11 @@ export interface MeasuredNode {
   style: Record<string, string>;
   /** Ancestor elements between this node and <body>; direct children of body are 0. */
   depth?: number;
+  /**
+   * The selector of the nearest measured ancestor, so a check can compare siblings (tiles in one grid).
+   * Only the Figma serialiser sets it today; checks that need it skip a doc without it.
+   */
+  parent?: string;
 }
 
 export interface MeasuredDoc {

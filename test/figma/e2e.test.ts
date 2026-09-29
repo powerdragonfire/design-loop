@@ -97,7 +97,7 @@ describe("the Figma loop, end to end", () => {
     expect(JSON.parse(readFileSync(join(runDir, "v00", "screen.html"), "utf8")).document.id).toBe("10:1");
     expect(readFileSync(join(runDir, "v00", "screen.png")).subarray(0, 4)).toEqual(PNG.subarray(0, 4));
     const doc = JSON.parse(readFileSync(join(runDir, "v00", "digest.json"), "utf8"));
-    expect(doc.nodes.map((n: { selector: string }) => n.selector)).toEqual(["10:11"]);
+    expect(doc.nodes.map((n: { selector: string }) => n.selector)).toEqual(["Card"]);
     expect(doc.nodes[0].bbox).toEqual({ x: 20, y: 100, w: 350, h: 200 }); // frame-relative, not x=15465
 
     answer(runDir, "v00", 95);
@@ -111,7 +111,7 @@ describe("the Figma loop, end to end", () => {
     const runDir = (await step(designDir)).runDir;
     record(runDir, "v00", "10:1");
     await step(designDir, figmaApi(), runDir);
-    answer(runDir, "v00", 60, [majorOn("10:11")]);
+    answer(runDir, "v00", 60, [majorOn("Card")]);
     expect(orderOf(await step(designDir, figmaApi(), runDir)).kind).toBe("chair");
     writeFileSync(join(runDir, "v00", "inbox", "chair.json"),
       JSON.stringify({ prompt: "give the card more room", changeIds: ["t-1"] }));
@@ -139,7 +139,7 @@ describe("the Figma loop, end to end", () => {
     const runDir = (await step(designDir)).runDir;
     record(runDir, "v00", "10:1");
     await step(designDir, figmaApi(), runDir);
-    answer(runDir, "v00", 60, [majorOn("10:11")]);
+    answer(runDir, "v00", 60, [majorOn("Card")]);
     await step(designDir, figmaApi(), runDir);
     writeFileSync(join(runDir, "v00", "inbox", "chair.json"), JSON.stringify({ prompt: "more room", changeIds: ["t-1"] }));
     await step(designDir, figmaApi(), runDir);

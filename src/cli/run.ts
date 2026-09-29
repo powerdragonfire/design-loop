@@ -94,16 +94,21 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     costUsd(cfg.models.critic, zero);
     costUsd(cfg.models.chair, zero);
   }
-  const quota = await readQuota(opts.quotaDir ?? designDir);
-  const needed = totalCandidates + cfg.maxRounds;
-  if (quota.remaining < needed) {
-    const [y, m] = quota.month.split("-").map(Number);
-    const resets = new Date(Date.UTC(y!, m!, 1)).toISOString().slice(0, 10);
-    throw new Error(
-      `Stitch quota too low: ${quota.remaining} generations left, a run may need ${needed} generations — resets ${resets}`,
-    );
+  // A Figma frame costs no generation quota — it is built by the operator, not generated — so the budget check
+  // and its wording are Stitch's alone. Everything below is unchanged for a Stitch run.
+  const figma = cfg.generator === "figma";
+  const quota = figma ? null : await readQuota(opts.quotaDir ?? designDir);
+  if (quota) {
+    const needed = totalCandidates + cfg.maxRounds;
+    if (quota.remaining < needed) {
+      const [y, m] = quota.month.split("-").map(Number);
+      const resets = new Date(Date.UTC(y!, m!, 1)).toISOString().slice(0, 10);
+      throw new Error(
+        `Stitch quota too low: ${quota.remaining} generations left, a run may need ${needed} generations — resets ${resets}`,
+      );
+    }
+    if (quota.warn) log?.(`Stitch quota: ${quota.used}/${MONTHLY_LIMIT} used this month`);
   }
-  if (quota.warn) log?.(`Stitch quota: ${quota.used}/${MONTHLY_LIMIT} used this month`);
   // loadContract has already refused a null sigma.
   const sigma = cfg.sigma!;
   // A stale calibration is the quiet failure: sigma decides when the run stops, so a run judged against
@@ -113,7 +118,9 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   progress.header([
     `run ${screen} · design ${designDir}`,
     `critic ${cfg.models.critic} (${cfg.criticMode}) · chair ${cfg.models.chair} · sigma ${sigma} · up to ${cfg.maxRounds} edits`,
-    `Stitch ${quota.used}/${MONTHLY_LIMIT} used this month · results in ${run.dir}`,
+    quota
+      ? `Stitch ${quota.used}/${MONTHLY_LIMIT} used this month · results in ${run.dir}`
+      : `Figma file ${cfg.figma?.fileKey ?? "(unset)"} · results in ${run.dir}`,
   ]);
   progress.attachLog(join(run.dir, "events.jsonl"));
 
@@ -239,7 +246,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       fraction: 0,
       status: `${spendStatus()} · ${stitchGenerations} Stitch generations`,
     });
-    const handle: Screen = await progress.phase("stitch generate", () => generator.generate(prompt));
+    const handle: Screen = await progress.phase(figma ? "figma frame" : "stitch generate", () => generator.generate(prompt));
     stitchGenerations++;
     const [html, png] = await progress.phase(
       "fetch html + image",
@@ -399,7 +406,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
         fraction: n / cfg.maxRounds,
         status: `${spendStatus()} · ${stitchGenerations} Stitch generation${stitchGenerations === 1 ? "" : "s"}`,
       });
-      const handle: Screen = await progress.phase("stitch edit", () => baseHandle.edit(prompt));
+      const handle: Screen = await progress.phase(figma ? "figma edit" : "stitch edit", () => baseHandle.edit(prompt));
       stitchGenerations++;
       const [html, png] = await progress.phase(
         "fetch html + image",

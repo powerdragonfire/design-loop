@@ -283,6 +283,23 @@ describe("runScreen", () => {
     expect(existsSync(join(runDir(dir), "v00", "screen.png"))).toBe(true);
   });
 
+  it("does not hold a Figma run to the Stitch quota, and names the Figma file instead", async () => {
+    // Frames are built by the operator, not generated, so an exhausted Stitch month must not block the run.
+    const { progress, events } = recordProgress();
+    const o = opts(
+      { criticMode: "agent", generator: "figma", figma: { fileKey: "FILEKEY" } },
+      {
+        quotaRemaining: 0,
+        progress,
+        generator: { generate: async (p) => { throw new DesignPending(p, null); }, variants: async () => [] },
+      },
+    );
+    await expect(runScreen(o)).rejects.toBeInstanceOf(DesignPending);
+    expect(events).toContain(`header Figma file FILEKEY · results in ${runDir(o.designDir)}`);
+    expect(events.join("\n")).not.toMatch(/Stitch/);
+    expect(events.some((e) => e.startsWith("begin figma frame"))).toBe(true);
+  });
+
   it("aborts before generating when the quota cannot cover a whole run", async () => {
     const dir = setup(); const gen = new FakeGenerator([shot(48)]);
     await reserve(dir, MONTHLY_LIMIT - 3);

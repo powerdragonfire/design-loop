@@ -6,7 +6,7 @@ import { AgentLlmClient, WorkOrderPending } from "../critics/agent.js";
 import { LLM_CRITICS } from "../critics/llm.js";
 import { staleAgents } from "./agents.js";
 import { measure } from "../measure/measure.js";
-import { openExistingRun, openRun, writeAtomic } from "../store/store.js";
+import { openExistingRun, openRun, readSource, sourceFile, writeAtomic } from "../store/store.js";
 import type { Generator } from "../stitch/adapter.js";
 import type { CriticName, MeasuredDoc } from "../types.js";
 import { noProgress, type Progress } from "./progress.js";
@@ -67,7 +67,7 @@ interface WorkUnit {
 
 const rel = (version: string, file: string): string => `${version}/${file}`;
 
-function unitsFor(pending: WorkOrderPending, screen: string): WorkUnit[] {
+function unitsFor(pending: WorkOrderPending, screen: string, source: string): WorkUnit[] {
   const { version } = pending;
   if (pending.kind === "chair") {
     // No fallback to this round's screen.png: after a regression that is the wrong image, which is the bug
@@ -96,7 +96,8 @@ function unitsFor(pending: WorkOrderPending, screen: string): WorkUnit[] {
     inputs: {
       digest: rel(version, "digest.txt"),
       screenshot: rel(version, "screen.png"),
-      html: rel(version, "screen.html"),
+      // `nodeTree` for a Figma frame, so nobody opens JSON expecting markup; `html` for a Stitch page.
+      ...(source === "screen.json" ? { nodeTree: rel(version, source) } : { html: rel(version, source) }),
       screenSpec: `screens/${screen}.md`,
       brief: "brief.md",
       tokens: "tokens.json",
@@ -116,6 +117,7 @@ export async function writeWorkOrder(opts: {
 }): Promise<string> {
   const { runDir, designDir, screen, pending } = opts;
   const file = join(runDir, pending.version, "work-order.json");
+  const source = (await readSource(join(runDir, pending.version)))?.file ?? "screen.html";
   await writeAtomic(file, `${JSON.stringify({
     kind: pending.kind,
     version: pending.version,
@@ -123,7 +125,7 @@ export async function writeWorkOrder(opts: {
     designDir: resolve(designDir),
     runDir: resolve(runDir),
     concurrency: 4,
-    units: unitsFor(pending, screen),
+    units: unitsFor(pending, screen, source),
   }, null, 2)}\n`);
   return file;
 }
@@ -222,7 +224,7 @@ export async function snapshotDesigns(runDir: string, generator: Generator): Pro
     const dir = join(runDir, version);
     const id = (await readOptional(join(dir, "screen-id.txt")))?.trim();
     if (!id) continue;
-    if (await exists(join(dir, "screen.html"))) continue;
+    if ((await readSource(dir)) !== null) continue;
 
     const raw = await readOptional(join(dir, "work-order.json"));
     const order = raw === null ? null : (JSON.parse(raw) as {
@@ -244,7 +246,7 @@ export async function snapshotDesigns(runDir: string, generator: Generator): Pro
     const html = await handle.getHtml();
     const png = await handle.getImage();
     await writeAtomic(join(dir, "screen.png"), png);
-    await writeAtomic(join(dir, "screen.html"), html);
+    await writeAtomic(join(dir, sourceFile(html)), html);
     taken.push(version);
   }
   return taken;

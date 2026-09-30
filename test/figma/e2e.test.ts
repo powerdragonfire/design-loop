@@ -93,8 +93,11 @@ describe("the Figma loop, end to end", () => {
     record(runDir, "v00", "10:1");
     const scored = await step(designDir, figmaApi(), runDir);
     expect(orderOf(scored).kind).toBe("critics");
+    // Critics are pointed at the node tree under its own name, never at an "html" that holds JSON.
+    expect(orderOf(scored).units[0].inputs).toMatchObject({ nodeTree: "v00/screen.json" });
+    expect(orderOf(scored).units[0].inputs.html).toBeUndefined();
     // The frame is frozen into the version directory as the node tree, and measured natively from it.
-    expect(JSON.parse(readFileSync(join(runDir, "v00", "screen.html"), "utf8")).document.id).toBe("10:1");
+    expect(JSON.parse(readFileSync(join(runDir, "v00", "screen.json"), "utf8")).document.id).toBe("10:1");
     expect(readFileSync(join(runDir, "v00", "screen.png")).subarray(0, 4)).toEqual(PNG.subarray(0, 4));
     const doc = JSON.parse(readFileSync(join(runDir, "v00", "digest.json"), "utf8"));
     expect(doc.nodes.map((n: { selector: string }) => n.selector)).toEqual(["Card"]);
@@ -128,7 +131,7 @@ describe("the Figma loop, end to end", () => {
     const next = await step(designDir, api, runDir);
     expect(orderOf(next).kind).toBe("critics");
     expect(orderOf(next).version).toBe("v01");
-    expect(JSON.parse(readFileSync(join(runDir, "v01", "screen.html"), "utf8")).document.id).toBe("10:2");
+    expect(JSON.parse(readFileSync(join(runDir, "v01", "screen.json"), "utf8")).document.id).toBe("10:2");
     // v00 was already frozen on disk, so only the new frame was read from Figma.
     expect(api.reads).toEqual(["10:2"]);
     expect(existsSync(join(runDir, "manifest.json"))).toBe(false);
@@ -147,7 +150,7 @@ describe("the Figma loop, end to end", () => {
     record(runDir, "v01", "10:1");
     await expect(step(designDir, figmaApi(), runDir)).rejects.toThrow(/built FROM \(v00\)\. Duplicate that frame/);
     // A plain failure: nothing snapshotted, nothing finalised, so recording the right id and stepping recovers.
-    expect(existsSync(join(runDir, "v01", "screen.html"))).toBe(false);
+    expect(existsSync(join(runDir, "v01", "screen.json"))).toBe(false);
     expect(existsSync(join(runDir, "manifest.json"))).toBe(false);
     record(runDir, "v01", "10:2");
     expect(orderOf(await step(designDir, figmaApi(), runDir)).kind).toBe("critics");
@@ -158,7 +161,7 @@ describe("the Figma loop, end to end", () => {
     const runDir = (await step(designDir)).runDir;
     record(runDir, "v00", "99:99");
     await expect(step(designDir, figmaApi(), runDir)).rejects.toThrow(/has no node 99:99/);
-    expect(existsSync(join(runDir, "v00", "screen.html"))).toBe(false);
+    expect(existsSync(join(runDir, "v00", "screen.json"))).toBe(false);
     expect(existsSync(join(runDir, "manifest.json"))).toBe(false);
 
     record(runDir, "v00", "10:1");

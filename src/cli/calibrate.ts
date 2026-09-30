@@ -7,7 +7,7 @@ import { distill } from "../distill/distill.js";
 import { LLM_CRITICS, runCommittee, type CriticInput, type LlmClient } from "../critics/llm.js";
 import { AgentLlmClient, WorkOrderPending } from "../critics/agent.js";
 import { composite, renormalise } from "../scoring/score.js";
-import { versionName, writeAtomic } from "../store/store.js";
+import { sourceFile, versionName, writeAtomic } from "../store/store.js";
 import { costUsd } from "./pricing.js";
 import { committeeHooks, noProgress, type Progress } from "./progress.js";
 import type { Config, Contract, CriticName, MeasuredDoc, Usage } from "../types.js";
@@ -240,7 +240,7 @@ export async function calibrateAgent(opts: {
     const det = deterministicCritique(doc, contract.tokens);
     const digest = distill(doc);
     const measurements = det.critique.issues.filter((i) => !i.id.startsWith("det-token-"));
-    const source = html.trimStart().startsWith("{") ? "screen.json" : "screen.html";
+    const source = sourceFile(html);
     const input: CriticInput = { contract, screen, digest, imagePng: png, openIssues: [], measurements };
     const screenDir = join(workDir, screen);
     const scores: number[] = [];
@@ -275,7 +275,7 @@ export async function calibrateAgent(opts: {
             inputs: {
               digest: rel("digest.txt"),
               screenshot: rel("screen.png"),
-              html: rel(source),
+              ...(source === "screen.json" ? { nodeTree: rel(source) } : { html: rel(source) }),
               // No screen spec: a reference screen is judged against the brief and tokens alone, as the API path does.
               screenSpec: null,
               brief: "brief.md",

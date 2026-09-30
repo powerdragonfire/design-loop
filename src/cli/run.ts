@@ -10,7 +10,7 @@ import { runCommittee, type LlmClient } from "../critics/llm.js";
 import { WorkOrderPending } from "../critics/agent.js";
 import { DesignPending } from "../figma/generator.js";
 import { chair, type ChairClient } from "../chair/chair.js";
-import { selectCandidate, type CandidateRow } from "./candidates.js";
+import { readDirections, selectCandidate, type CandidateRow } from "./candidates.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
 import { MONTHLY_LIMIT, readQuota } from "../stitch/quota.js";
 import { openRun, versionName, writeChair, type CandidateSummary, type Degradation, type Run } from "../store/store.js";
@@ -247,7 +247,10 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
    */
   const agentRoundZero = async (): Promise<Seed> => {
     const version = versionName(0);
-    const prompt = buildFirstPrompt(contract, screen);
+    // The first family's direction, exactly as the candidate stage gives its one seed.
+    const direction = (await readDirections(designDir, screen))[0];
+    const base = buildFirstPrompt(contract, screen);
+    const prompt = direction ? `${base}\n\nArt direction: ${direction}` : base;
     progress.banner(`${version} · first generation`, {
       fraction: 0,
       status: `${spendStatus()} · ${stitchGenerations} Stitch generations`,

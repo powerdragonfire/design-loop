@@ -11,16 +11,24 @@ import { runCommittee, type LlmClient } from "../critics/llm.js";
 import { validateEvidence } from "../evidence/validate.js";
 import { composite, gate, openIssues, renormalise } from "../scoring/score.js";
 
-/**
- * The art directions a run fans out over, one per `## ` heading of `directions.md`. The prose under a
- * heading is appended to the first prompt; the heading itself is only a label for a human reader.
- * A missing file is not an error: a design folder that has not opted in runs one family with no rider.
- */
-export async function readDirections(designDir: string): Promise<string[]> {
-  const raw = await readFile(join(designDir, "directions.md"), "utf8").catch((err: NodeJS.ErrnoException) => {
+const readIfThere = (file: string): Promise<string | null> =>
+  readFile(file, "utf8").catch((err: NodeJS.ErrnoException) => {
     if (err.code === "ENOENT") return null;
     throw err;
   });
+
+/**
+ * The art directions a run fans out over, one per `## ` heading. The prose under a heading is appended to the
+ * first prompt; the heading itself is only a label for a human reader.
+ *
+ * `directions/<screen>.md` is read first, then the folder-wide `directions.md`. Directions are usually written
+ * for one screen ("Tile grid … Account, Albums"), and a folder-wide file handed them to every screen in the
+ * folder. A missing file is not an error: a design folder that has not opted in runs one family with no rider.
+ */
+export async function readDirections(designDir: string, screen?: string): Promise<string[]> {
+  const raw =
+    (screen !== undefined ? await readIfThere(join(designDir, "directions", `${screen}.md`)) : null) ??
+    (await readIfThere(join(designDir, "directions.md")));
   if (raw === null) return [];
   // Normalize line endings so CRLF files and LF files behave identically, and multi-paragraph
   // directions don't retain internal \r\n.
@@ -56,7 +64,7 @@ export interface GenerateOptions {
  */
 export async function generateCandidates(opts: GenerateOptions): Promise<Candidate[]> {
   const { contract, screen, designDir, generator, cfg, progress } = opts;
-  const directions = await readDirections(designDir);
+  const directions = await readDirections(designDir, screen);
   const base = buildFirstPrompt(contract, screen);
   const { families, variantsPerFamily, creativeRange, aspects } = cfg.candidates;
   const out: Candidate[] = [];

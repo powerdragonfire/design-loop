@@ -40,6 +40,15 @@ describe("readDirections", () => {
     expect(await readDirections(dir)).toEqual(["First line.\n\nSecond line."]);
   });
 
+  it("prefers the screen's own directions/<screen>.md over the folder-wide file", async () => {
+    await writeFile(join(dir, "directions.md"), "## Settings\n\nTile grid.\n");
+    await mkdirAsync(join(dir, "directions"));
+    await writeFile(join(dir, "directions", "join-trip.md"), "## Invite\n\nLead with who invited you.\n");
+    expect(await readDirections(dir, "join-trip")).toEqual(["Lead with who invited you."]);
+    // A screen with no file of its own falls back to the folder-wide one.
+    expect(await readDirections(dir, "settings")).toEqual(["Tile grid."]);
+  });
+
   it("returns nothing when the file is absent, so an existing design folder is unchanged", async () => {
     expect(await readDirections(dir)).toEqual([]);
   });

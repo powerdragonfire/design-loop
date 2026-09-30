@@ -3,7 +3,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { DesignPending } from "../figma/generator.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
-import { versionName, type Run, type RoundCursor, type VersionHandle } from "../store/store.js";
+import { readSource, versionName, type Run, type RoundCursor, type VersionHandle } from "../store/store.js";
 import type { MeasuredDoc } from "../types.js";
 
 // Re-exported so a caller wiring the loop up reaches for one module, not two. `versionName` and `RoundCursor`
@@ -58,7 +58,13 @@ export function resumingGenerator(opts: { runDir: string; inner: Generator; curs
       // It passes its own index as the parent: after a regression the loop edits the BEST version's handle,
       // so the version this edit builds on is this handle's, not "the new one minus one".
       edit: (prompt) => acquire(() => screen.edit(prompt), index),
-      getHtml: fromDisk ? () => readFile(join(dir, "screen.html"), "utf8") : () => screen.getHtml(),
+      getHtml: fromDisk
+        ? async () => {
+            const stored = await readSource(dir);
+            if (stored === null) throw new Error(`${versionName(index)} has a screen id but no stored screen source`);
+            return stored.content;
+          }
+        : () => screen.getHtml(),
       getImage: fromDisk ? () => readFile(join(dir, "screen.png")) : () => screen.getImage(),
     };
   };
@@ -135,8 +141,8 @@ export function resumingMeasure(opts: {
   const build = async (): Promise<Map<string, string>> => {
     const map = new Map<string, string>();
     for (const version of await listVersions(runDir)) {
-      const stored = await readOptional(join(runDir, version, "screen.html"));
-      if (stored !== null) map.set(sha(stored), version);
+      const stored = await readSource(join(runDir, version));
+      if (stored !== null) map.set(sha(stored.content), version);
     }
     return map;
   };

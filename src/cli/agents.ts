@@ -89,7 +89,8 @@ An input whose value is \`null\` is one you are deliberately not shown. Read the
 JSON to the output path, and write nothing else anywhere.
 
 - \`digest\`: one line per rendered element. ${LEGEND}
-- \`screenshot\`, \`html\`, \`screenSpec\`, \`brief\`, \`tokens\`: the screen and the contract it is judged against.
+- \`screenshot\`, \`html\` (a Stitch page) or \`nodeTree\` (a Figma frame's node tree, as JSON), \`screenSpec\`, \`brief\`,
+  \`tokens\`: the screen and the contract it is judged against.
 - \`carriedIssues\`: the issues open from earlier rounds. List an id under \`resolved.claimed\` only if it is now
   fixed; re-list a persisting issue under its existing id. If the element it cites was renamed or moved, so its
   selector is no longer in the digest, re-list it under the same id with \`evidence.selector\` set to the element's

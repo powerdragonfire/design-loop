@@ -290,3 +290,72 @@ describe("serialise feeds the existing pipeline unchanged", () => {
     expect(measurementsPass).toBe(false);
   });
 });
+
+describe("Figma conventions the serialiser reads", () => {
+  const box = (x: number, y: number, width: number, height: number) => ({ x: 15445 + x, y, width, height });
+
+  it("reads a control word only as the head noun, so containers that mention one are not buttons", () => {
+    expect(isInteractive({ id: "1", name: "Action bar", type: "FRAME" })).toBe(false);
+    expect(isInteractive({ id: "1", name: "Navigation / Trip Tab Bar", type: "FRAME" })).toBe(false);
+    expect(isInteractive({ id: "1", name: "Tab / Today", type: "FRAME" })).toBe(true);
+    expect(isInteractive({ id: "1", name: "Switch row / Push", type: "FRAME" })).toBe(true);
+  });
+
+  it("treats a control-named node holding two controls as a container, measuring each control", () => {
+    const doc = serialise(frame([
+      { id: "1:1", name: "Chip row", type: "FRAME", absoluteBoundingBox: box(0, 100, 300, 44), children: [
+        { id: "1:2", name: "All chip", type: "FRAME", absoluteBoundingBox: box(0, 100, 60, 44) },
+        { id: "1:3", name: "Mine chip", type: "FRAME", absoluteBoundingBox: box(70, 100, 60, 44) },
+      ] },
+    ]));
+    expect(doc.nodes.map((n) => [n.selector, n.role])).toEqual([
+      ["Chip_row", null], ["Chip_row>All_chip", "button"], ["Chip_row>Mine_chip", "button"],
+    ]);
+  });
+
+  it("exposes headings, image alt text, icon-only control names and selected variants", () => {
+    const doc = serialise(frame([
+      { id: "1:1", name: "Title", type: "TEXT", characters: "Group ideas", styles: { text: "s:h" }, absoluteBoundingBox: box(0, 60, 200, 30) },
+      { id: "1:2", name: "Lisbon tram on Rua da Graça", type: "RECTANGLE", fills: [{ type: "IMAGE" }], absoluteBoundingBox: box(0, 100, 300, 160) },
+      { id: "1:3", name: "Rectangle 4", type: "RECTANGLE", fills: [{ type: "IMAGE" }], absoluteBoundingBox: box(0, 270, 300, 160) },
+      { id: "1:4", name: "Close", type: "INSTANCE", componentId: "c:icon", absoluteBoundingBox: box(0, 440, 44, 44) },
+      { id: "1:5", name: "Group", type: "INSTANCE", componentId: "c:tab-on", absoluteBoundingBox: box(60, 440, 60, 44), children: [
+        { id: "1:6", name: "Label", type: "TEXT", characters: "Group", absoluteBoundingBox: box(60, 450, 40, 20) },
+      ] },
+    ]), {
+      styles: { "s:h": { name: "typography/headline-md" } },
+      components: { "c:icon": { name: "Icon button" }, "c:tab-on": { name: "State=Selected", componentSetId: "s:tab" } },
+      componentSets: { "s:tab": { name: "Tab Bar Item" } },
+    });
+    const by = (sel: string) => doc.nodes.find((n) => n.selector === sel)!;
+    expect(by("Title").role).toBe("heading");
+    expect(by("Lisbon_tram_on_Rua_da_Graça")).toMatchObject({ role: "img", label: "Lisbon tram on Rua da Graça" });
+    expect(by("Rectangle_4").label).toBeUndefined(); // a default name is no description
+    expect(by("Close")).toMatchObject({ role: "button", label: "Close" });
+    expect(by("Group")).toMatchObject({ role: "button", selected: true });
+    expect(by("Group").label).toBeUndefined(); // it shows its own text
+    expect(distill(doc)).toContain('aria-label="Close"');
+  });
+
+  it("marks fixed children pinned and checks only them against the inset on a scrolling screen", () => {
+    const screen: FigmaNode = {
+      ...frame([
+        { id: "1:1", name: "Content", type: "FRAME", absoluteBoundingBox: box(0, 0, 393, 1400), children: [
+          { id: "1:2", name: "Late button", type: "FRAME", absoluteBoundingBox: box(16, 800, 200, 44) },
+        ] },
+        { id: "1:3", name: "Bottom bar", type: "FRAME", absoluteBoundingBox: box(0, 780, 393, 72), children: [
+          { id: "1:4", name: "Save button", type: "FRAME", absoluteBoundingBox: box(16, 790, 361, 50) },
+        ] },
+      ]),
+      numberOfFixedChildren: 1,
+    };
+    const doc = serialise(screen);
+    const by = (sel: string) => doc.nodes.find((n) => n.selector === sel)!;
+    expect(by("Bottom_bar")).toMatchObject({ pinned: true, style: expect.objectContaining({ position: "fixed" }) });
+    expect(by("Bottom_bar>Save_button").pinned).toBe(true);
+    expect(by("Content>Late_button").pinned).toBe(false);
+    const inset = deterministicCritique(doc, {}).critique.issues.filter((i) => i.id.startsWith("det-inset-")).map((i) => i.id);
+    // The scrolling button can scroll clear of the home indicator; the pinned one cannot.
+    expect(inset).toEqual(["det-inset-Bottom_bar>Save_button"]);
+  });
+});

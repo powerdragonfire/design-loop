@@ -36,6 +36,18 @@ describe("deterministicCritique", () => {
       i.evidence.selector === "#c1" && /home indicator/i.test(i.claim))).toBe(true);
   });
 
+  it("on a scrolling page, checks only fixed controls against the inset", async () => {
+    const page = `<!doctype html><html><body style="margin:0">
+      <div style="height:2000px"><button id="scrolls" style="position:absolute;top:820px;width:200px;height:44px">More</button></div>
+      <nav style="position:fixed;bottom:0;left:0;right:0;height:60px"><button id="pinned" style="width:100px;height:50px">Save</button></nav>
+    </body></html>`;
+    const doc = await measure(page);
+    expect(doc.nodes.find(n => n.selector === "#pinned")!.pinned).toBe(true);
+    expect(doc.nodes.find(n => n.selector === "#scrolls")!.pinned).toBe(false);
+    const inset = deterministicCritique(doc, {}).critique.issues.filter(i => i.id.startsWith("det-inset-")).map(i => i.id);
+    expect(inset).toEqual(["det-inset-#pinned"]);
+  });
+
   it("sets measurementsPass false when any measurement fails", async () => {
     const { measurementsPass } = deterministicCritique(await measure(html), tokens);
     expect(measurementsPass).toBe(false);

@@ -132,6 +132,7 @@ export function figmaMeasure(opts: SerialiseOptions = {}): (html: string) => Pro
         ...opts,
         components: response.components ?? opts.components,
         componentSets: response.componentSets ?? opts.componentSets,
+        styles: response.styles ?? opts.styles,
       });
     }
     return serialise(parsed as FigmaNode, opts);

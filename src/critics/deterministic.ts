@@ -215,9 +215,18 @@ function gridIssues(nodes: MeasuredNode[]): Issue[] {
   return out;
 }
 
+/**
+ * On a page that scrolls, only what stays put can sit under the home indicator: everything else scrolls up
+ * past it. So when the doc says which nodes are pinned (both measuring paths now do) and its content runs
+ * past the screen, only pinned controls are checked. A doc stored before `pinned` existed, or a page that
+ * fits the screen, is checked in full, as before.
+ */
 function insetIssues(nodes: MeasuredNode[]): Issue[] {
   const top = VIEWPORT.h - HOME_INDICATOR_INSET;
+  const knowsPinning = nodes.some(n => n.pinned !== undefined);
+  const scrolls = knowsPinning && nodes.some(n => n.bbox.y + n.bbox.h > VIEWPORT.h + 1);
   return nodes.filter(isInteractive).flatMap(n => {
+    if (scrolls && !n.pinned) return [];
     const { y, h } = n.bbox;
     // Interactive elements that start on the first screen and reach into the inset.
     // Below-the-fold elements are not pinned to the bottom; wrappers are not interactive.

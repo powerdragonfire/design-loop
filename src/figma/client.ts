@@ -67,6 +67,7 @@ export class FigmaClient {
       document: entry.document as FigmaNode,
       components: entry.components ?? {},
       componentSets: entry.componentSets ?? {},
+      styles: entry.styles ?? {},
     };
   }
 

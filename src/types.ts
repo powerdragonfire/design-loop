@@ -34,6 +34,18 @@ export interface MeasuredNode {
    * Only the Figma serialiser sets it today; checks that need it skip a doc without it.
    */
   parent?: string;
+  /**
+   * The accessible name a screen reader would announce, when it is not the node's own text: an icon-only
+   * control's name, an image's alt text. Absent when the node has none.
+   */
+  label?: string;
+  /** A control currently in its selected / on / checked state, read from its variant. */
+  selected?: boolean;
+  /**
+   * The node stays put while the page scrolls (it or an ancestor is fixed or sticky). Both measuring paths set it
+   * on every node; a doc stored before it existed has it nowhere, and the inset check then behaves as it used to.
+   */
+  pinned?: boolean;
 }
 
 export interface MeasuredDoc {

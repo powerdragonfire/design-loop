@@ -4,7 +4,7 @@ import { measure } from "../measure/measure.js";
 import { deterministicCritique } from "../critics/deterministic.js";
 import { validateEvidence, promoteResolutions } from "../evidence/validate.js";
 import { composite, gate, openIssues, renormalise } from "../scoring/score.js";
-import { decide, type RoundRecord, type StopReason } from "../scoring/stop.js";
+import { compareRounds, decide, regressed as fellBack, type RoundRecord, type StopReason } from "../scoring/stop.js";
 import { distill } from "../distill/distill.js";
 import { runCommittee, type LlmClient } from "../critics/llm.js";
 import { WorkOrderPending } from "../critics/agent.js";
@@ -70,6 +70,12 @@ const addUsage = (total: Usage, more: Usage | undefined): void => {
 };
 
 const isDeterministic = (i: Issue): boolean => i.id.startsWith("det-");
+
+/** What the stop rule ranks a round by besides its composite: the blockers and majors it left open. */
+const issueCounts = (open: Issue[]): { blockers: number; majors: number } => ({
+  blockers: open.filter((i) => i.severity === "blocker").length,
+  majors: open.filter((i) => i.severity === "major").length,
+});
 
 /** `CandidateRow` names the field `open`; the store's `openIssues`/`VersionInput` shape names it `openIssues`. */
 const toSummary = (r: CandidateRow): CandidateSummary => ({
@@ -211,7 +217,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     prevDoc = winner.doc;
     carried = winner.open;
     prevOpen = winner.open;
-    rounds.push({ version: "v00", composite: winner.composite, gatePass: winner.gatePass });
+    rounds.push({ version: "v00", composite: winner.composite, gatePass: winner.gatePass, ...issueCounts(winner.open) });
     records.set("v00", {
       png: winner.png, doc: winner.doc, critiques: winner.critiques, open: winner.open,
       composite: winner.composite, prompt: winner.prompt, handle: winner.handle,
@@ -315,7 +321,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     prevDoc = doc;
     carried = open;
     prevOpen = open;
-    rounds.push({ version: slot.version, composite: score, gatePass: verdict.pass });
+    rounds.push({ version: slot.version, composite: score, gatePass: verdict.pass, ...issueCounts(open) });
     records.set(slot.version, { png, doc, critiques: scored, open, composite: score, prompt, handle });
     return { winner: "c0", summaries, handle };
   };
@@ -342,9 +348,14 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
 
       const last = records.get(written)!;
       const best = records.get(decision.best)!;
-      // A regression is judged against the noise floor, as convergence is. The chair then works on the BEST
-      // version, so it is given that version's screenshot and open issues, and the prompt that broke it.
-      const regressed = last.composite < best.composite - cfg.convergenceSigmas * sigma;
+      // A regression is more blockers or majors left open than the best version, or the same issues with a
+      // composite below it by more than the noise floor. The chair then works on the BEST version, so it is
+      // given that version's screenshot and open issues, and the prompt that broke it.
+      const regressed = fellBack(
+        rounds.find((r) => r.version === written)!,
+        rounds.find((r) => r.version === decision.best)!,
+        cfg.convergenceSigmas * sigma,
+      );
       // Only what the CHAIR sees is grouped: one off-token value on twenty elements is one edit, not twenty
       // rounds of the three-change cap. The store, the gate and the critics keep the per-selector issues.
       const chairInput = regressed
@@ -470,7 +481,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       // validated copy it would find nothing to drop and report 0. See `ScoredInput.rawCritiques`.
       await slot.finish({ critiques: scored, rawCritiques: committee.critiques, composite: score, gatePass: verdict.pass, openIssues: open, changes });
       const written = slot.version;
-      rounds.push({ version: written, composite: score, gatePass: verdict.pass });
+      rounds.push({ version: written, composite: score, gatePass: verdict.pass, ...issueCounts(open) });
       records.set(written, { png, doc, critiques: scored, open, composite: score, prompt, handle });
       log?.(`${written}: composite ${score.toFixed(1)}, ${open.length} open, gate ${verdict.pass ? "pass" : "fail"}`);
 
@@ -498,11 +509,9 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     abortReason = err instanceof Error ? err.message : String(err);
   }
 
-  // A gate-passing version outranks any other, then highest composite first; the sort is stable, so a tie keeps
-  // the earlier version.
-  const committeeRank = [...rounds]
-    .sort((a, b) => Number(b.gatePass) - Number(a.gatePass) || b.composite - a.composite)
-    .map((r) => r.version);
+  // The stop rule's own order: gate pass, then fewest open blockers, then majors, then composite. The sort is
+  // stable, so a tie keeps the earlier version.
+  const committeeRank = [...rounds].sort(compareRounds).map((r) => r.version);
   const total = noUsage();
   addUsage(total, criticUsage);
   addUsage(total, chairUsage);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decide, type RoundRecord } from "../../src/scoring/stop.js";
+import { compareRounds, decide, regressed, type RoundRecord } from "../../src/scoring/stop.js";
 
 const CFG = { sigma: 3, maxRounds: 5, convergenceSigmas: 1.0, convergenceRounds: 2 };
 const r = (i: number, composite: number, gatePass = false): RoundRecord =>
@@ -77,5 +77,43 @@ describe("decide", () => {
     ["maxRounds 0", { maxRounds: 0 }],
   ])("rejects an invalid config: %s", (_name, bad) => {
     expect(() => decide(seq([70, 90, 95]), { ...CFG, ...bad })).toThrow(/invalid stop config/);
+  });
+
+  // Issue counts: a closed blocker is a fact, a 0.3 composite gain is noise.
+  const ri = (i: number, composite: number, blockers: number, majors = 0, gatePass = false): RoundRecord =>
+    ({ version: `v0${i}`, composite, gatePass, blockers, majors });
+
+  it("picks the version with fewer open blockers over a higher composite", () => {
+    // The group-ideas run: v00 84.0 with 6 blockers, v02 83.7 with none.
+    const d = decide([ri(0, 84, 6, 4), ri(1, 80, 2, 3), ri(2, 83.7, 0, 1)], CFG);
+    expect(d.best).toBe("v02");
+  });
+
+  it("breaks a blocker tie on majors, then on composite", () => {
+    expect(decide([ri(0, 90, 1, 3), ri(1, 70, 1, 1)], CFG).best).toBe("v01");
+    expect(decide([ri(0, 70, 1, 1), ri(1, 90, 1, 1)], CFG).best).toBe("v01");
+  });
+
+  it("does not converge while each round closes a blocker or major", () => {
+    // Composite flat within one sigma, but the open issues fall every round.
+    expect(decide([ri(0, 80, 3, 2), ri(1, 80.5, 2, 2), ri(2, 81, 1, 2), ri(3, 80, 0, 2)], CFG).stop).toBeNull();
+  });
+
+  it("converges once issues and composite both stall", () => {
+    const d = decide([ri(0, 80, 3), ri(1, 81, 1), ri(2, 81.5, 1), ri(3, 80.5, 2)], CFG);
+    expect(d).toEqual({ stop: "converged", best: "v02" });
+  });
+
+  it("ranks gate pass, then blockers, majors, composite", () => {
+    const order = [ri(0, 95, 2), ri(1, 60, 0, 3), ri(2, 70, 0, 1), ri(3, 50, 0, 0, true)]
+      .sort(compareRounds).map(r => r.version);
+    expect(order).toEqual(["v03", "v02", "v01", "v00"]);
+  });
+
+  it("calls a round a regression when it opens more blockers, whatever its composite", () => {
+    expect(regressed(ri(1, 90, 2), ri(0, 80, 1), 3)).toBe(true);
+    expect(regressed(ri(1, 78, 1), ri(0, 80, 1), 3)).toBe(false);
+    expect(regressed(ri(1, 76, 1), ri(0, 80, 1), 3)).toBe(true);
+    expect(regressed(ri(0, 80, 1), ri(0, 80, 1), 3)).toBe(false);
   });
 });

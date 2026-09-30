@@ -68,6 +68,7 @@ const chairScreenshot = (input: ChairInput, version: string): string =>
  * tokens, with the image as a path. `critiques` is left out because the API chair never sends it either.
  */
 const chairInputFile = (input: ChairInput, screenshot: string) => ({
+  generator: input.generator ?? "stitch",
   screenshot,
   openIssues: input.openIssues,
   regression: input.regression,

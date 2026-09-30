@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentChairClient } from "../../src/chair/agent.js";
@@ -27,6 +27,14 @@ describe("AgentChairClient", () => {
   it("suspends when the chair has not answered", async () => {
     const client = new AgentChairClient({ runDir: setup(), cursor: { index: 0 } });
     await expect(client.synthesise(input, "agent")).rejects.toThrow(WorkOrderPending);
+  });
+
+  it("tells the chair which generator applies its prompt", async () => {
+    const runDir = setup();
+    const client = new AgentChairClient({ runDir, cursor: { index: 0 } });
+    await expect(client.synthesise({ ...input, generator: "figma" }, "agent")).rejects.toThrow(WorkOrderPending);
+    const written = JSON.parse(readFileSync(join(runDir, versionName(0), "chair-input.json"), "utf8"));
+    expect(written.generator).toBe("figma");
   });
 
   it("resolves change ids against the open issues and never invents one", async () => {

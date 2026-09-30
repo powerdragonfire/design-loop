@@ -364,6 +364,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
             openIssues: groupTokenIssues(best.open),
             imagePng: best.png,
             tokens: contract.tokens,
+            generator: cfg.generator ?? "stitch",
             regression: {
               bestVersion: decision.best,
               delta: last.composite - best.composite,
@@ -371,10 +372,13 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
               failedPrompt: last.prompt,
             },
           }
-        : { critiques: last.critiques, openIssues: groupTokenIssues(last.open), imagePng: last.png, tokens: contract.tokens, regression: null };
+        : {
+            critiques: last.critiques, openIssues: groupTokenIssues(last.open), imagePng: last.png, tokens: contract.tokens,
+            regression: null, generator: cfg.generator ?? "stitch",
+          };
 
       const chairPhase = (): Promise<Awaited<ReturnType<typeof askChair>>> =>
-        progress.phase("chair", () => askChair(chairInput), (c) => `${c.changes.length} change${c.changes.length === 1 ? "" : "s"} asked of Stitch`);
+        progress.phase("chair", () => askChair(chairInput), (c) => `${c.changes.length} change${c.changes.length === 1 ? "" : "s"} asked of ${figma ? "Figma" : "Stitch"}`);
       let next;
       try {
         next = await chairPhase();

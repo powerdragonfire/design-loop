@@ -91,8 +91,12 @@ JSON to the output path, and write nothing else anywhere.
 - \`digest\`: one line per rendered element. ${LEGEND}
 - \`screenshot\`, \`html\`, \`screenSpec\`, \`brief\`, \`tokens\`: the screen and the contract it is judged against.
 - \`carriedIssues\`: the issues open from earlier rounds. List an id under \`resolved.claimed\` only if it is now
-  fixed; re-list a persisting issue under its existing id.
+  fixed; re-list a persisting issue under its existing id. If the element it cites was renamed or moved, so its
+  selector is no longer in the digest, re-list it under the same id with \`evidence.selector\` set to the element's
+  current selector: an issue citing a selector that is gone is discarded, and the problem would be lost.
 - \`measurements\`, when you are given it: deterministic measurements. They are facts; do not contradict them.
+  They list failures only. An empty list \`[]\` means every check passed — contrast on every text node, tap size and
+  home-indicator inset on every control, tile heights in every grid — not that nothing was measured.
 
 Number any NEW issue starting at the \`nextIssueId\` you are given, never at 001: a new issue that reuses an id
 from \`carriedIssues\` replaces that issue without it ever being checked.
@@ -120,9 +124,9 @@ const chairCall = `## How you are called
 A work order gives you two input paths and exactly one output path, all relative to its \`runDir\`. Read the
 inputs, write your answer as JSON to the output path, and write nothing else anywhere.
 
-- \`chairInput\`: a JSON file holding \`openIssues\` (the only issues you may choose; name each in
-  \`changeIds\` exactly as it appears there), \`tokens\` (the design token values to cite), \`regression\` and
-  \`screenshot\`.
+- \`chairInput\`: a JSON file holding \`generator\` (\`stitch\` or \`figma\`: who applies your prompt), \`openIssues\`
+  (the only issues you may choose; name each in \`changeIds\` exactly as it appears there), \`tokens\` (the design
+  token values to cite), \`regression\` and \`screenshot\`.
 - \`screenshot\`: the screen your edit will be applied to.
 
 When \`regression\` is not null, the last edit made the design worse: its score moved by \`regression.delta\`

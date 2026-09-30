@@ -12,6 +12,11 @@ export interface ChairInput {
    * version's screenshot), and is told how far the last edit fell, what it introduced and the prompt that caused it.
    */
   regression: { bestVersion: string; delta: number; introduced: Issue[]; failedPrompt: string } | null;
+  /**
+   * Who applies the prompt. A Figma edit is made by hand and cannot set `aria-*` or markup, so the chair is told
+   * which it is writing for (chair.md says what each can express). Absent reads as Stitch.
+   */
+  generator?: "stitch" | "figma";
 }
 
 export interface ChairClient {
@@ -140,6 +145,7 @@ export class AnthropicChairClient implements ChairClient {
 
     // Volatile part, after the cache breakpoint.
     const parts = [
+      `Generator: ${input.generator ?? "stitch"}`,
       input.openIssues.length
         ? `Open issues:\n${input.openIssues.map(describeIssue).join("\n")}`
         : "No issues are open.",

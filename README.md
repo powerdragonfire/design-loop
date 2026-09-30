@@ -34,7 +34,9 @@ design/
   brief.md             the product brief every critic is given
   screens/<name>.md    one spec per screen; `run <name>` needs screens/<name>.md
   directions.md        optional: one `## ` heading per art direction, fanned out into a candidate family each
-  reference/           three real Stitch outputs, <name>.html beside <name>.png, for calibrate
+  directions/<name>.md optional: the same, for one screen only; read before directions.md
+  reference/           three real outputs, <name>.html (Stitch) or <name>.json (a Figma node tree) beside
+                       <name>.png, for calibrate
   .design-loop/        written by the tool: quota.json, calibration.json
   runs/<date>-<screen>/  one directory per run:
     candidates/<id>/      every candidate stage row (screenshot, HTML, critiques), plus selection.json
@@ -46,11 +48,11 @@ design/
 | Command | What it does | Cost |
 | --- | --- | --- |
 | `smoke` | Calls every live service once — a critic call, the same call again to prove the prompt cache hits, a chair call, a Stitch generate AND edit, then `measure()` on the real Stitch page — and prints PASS/FAIL/SKIP per step. Run it first. | 2 Stitch generations, ~$0.30 |
-| `calibrate [--repeats N]` | Scores each `reference/` screen N times and writes the composite's noise floor into `config.json` as `sigma`, plus `.design-loop/calibration.json`. Re-run it after changing the critic model or the weights. | ~$2.20 at 5 repeats |
+| `calibrate [--repeats N]` | Scores each `reference/` screen N times and writes the composite's noise floor into `config.json` as `sigma`, plus `.design-loop/calibration.json` (which records the critic mode it was measured in). Re-run it after changing the critic model, the weights or the critic mode. In `criticMode: "agent"` it works like `step`: it writes one `work-order.json` under `.design-loop/calibrate-agent/` naming every critic for every repeat, exits 10, and once they have answered, run it again (same `--repeats`) to compute sigma. | ~$2.20 at 5 repeats; not metered in agent mode |
 | `ab-distiller` | Critiques each reference screen twice, once from the digest and once from raw HTML, and lists the claims only the raw HTML produced. Whatever it lists is a field `measure`'s `STYLE_PROPS` is missing. | ~$8 |
 | `sync-agents [--agents-dir <dir>]` | Writes `design-loop-<critic>.md` and the chair's agent file from the critic rubrics baked into this build, into `~/.claude/agents/` so Claude Code finds them from any project. Agent mode only — `run`/`step` refuse to dispatch a subagent against a stale one, and check the same directory (pass them the same `--agents-dir` if you override it). Re-run it after upgrading. The copies under this repo's `.claude/agents/` are a reference, not what is dispatched. | free |
 | `run <screen> [--date YYYY-MM-DD]` | Generates `families × (1 + variantsPerFamily)` candidates (config's `candidates` section — see [Generating more than one candidate](#generating-more-than-one-candidate); the default, `families: 1, variantsPerFamily: 0`, is one generation, today's behaviour), scores and selects one, promotes it to `v00`, then the edit loop. In `criticMode: "api"` it runs to completion, showing each step live, then prints the stop reason, the versions, the spend and the report path. In `criticMode: "agent"` it IS the first `step`: with the default single candidate it generates `v00`, suspends on its critics and exits 10. Agent mode refuses a config that asks for more than one candidate (see Known limits). | ~$1.06 per screen by default; ~$2.30 with the six-candidate example below, see the caveat there; not metered in agent mode |
-| `step <runDir>` | Advances a suspended agent-mode run by one round. Everything already answered on disk is replayed for free; the first thing nobody has answered yet stops the run again and writes a `work-order.json` naming which subagents to dispatch. Keep calling it until it exits 0. | free (the round's own Stitch generation aside) |
+| `step <runDir>` | Advances a suspended agent-mode run by one round. Everything already answered on disk is replayed for free; the first thing nobody has answered yet stops the run again and writes a `work-order.json` naming which subagents to dispatch. Keep calling it until it exits 0 — or let the `design-loop-drive` workflow (`.claude/workflows/`) step and dispatch for you; it returns at each Figma design order. | free (the round's own Stitch generation aside) |
 | `inspect <versionDir> [--selector <css> \| --text <substring>]` | Looks up measured nodes from a version's digest by selector or text, for a person checking a critic's claim against the real page. Agent-mode critics have no shell; they read the same `vNN/digest.json` directly. | free |
 | `review <runDir>` | Builds the report, opens it, and asks which version to approve. | free |
 | `report <runDir>` | Builds the report page and opens it, approving nothing. | free |
@@ -74,7 +76,8 @@ the edit loop starts, add a `candidates` block to `config.json`:
 ```
 
 `families` is how many independent first generations to make — each from the bare spec, or from the spec plus
-one `## ` section of `directions.md` if that file has enough sections. `variantsPerFamily` (0–5) asks Stitch for
+one `## ` section of `directions/<screen>.md` (or, if the screen has none, `directions.md`) if that file has
+enough sections. An agent-mode run's single generation gets the first section. `variantsPerFamily` (0–5) asks Stitch for
 that many variants of each family's generation via `generate_variants`, which nudges `aspects` within
 `creativeRange`. The block above makes `2 × (1 + 2) = 6` candidates from two art directions. Every candidate is
 measured and critiqued the same way a round is; the winner is copied to `v00` and the loop iterates it exactly
@@ -127,12 +130,29 @@ Differences from a Stitch run:
 
 - **Agent mode only**, so one candidate only, and it costs no Stitch quota and no Anthropic credit.
 - **The frame is measured from Figma's own node tree**, not by rendering HTML in Chromium, so bounds, fills,
-  font sizes and radii are exact, and selectors are Figma node ids — stable across rounds, so the critics'
-  hallucination rate drops. The critics' `html` input is that node tree as JSON.
-- **Tap-target and safe-area checks need to know what is tappable.** A node counts if it has a prototype
-  interaction, or if its layer, its main component or its component set is named like a control (button,
-  link, tab, toggle, switch, chip, action, row, field, input, cta). Name your components that way, or those
-  two checks will not see them.
+  font sizes and radii are exact. Selectors are layer-name paths (`Content>Tile_grid>Tile_/_Notifications`),
+  which survive the duplicate each round makes. The node tree is stored as `vNN/screen.json` and handed to the
+  critics as `nodeTree`.
+- **The chair is told it is writing for Figma**, so it asks for layer names, text styles, variants and fixed
+  children rather than `aria-*` attributes or markup.
+
+### What the loop reads from your layers
+
+Figma has no HTML semantics, so the serialiser reads them from how the file is built. Build to these and the
+checks and critics see what you meant:
+
+| To get | Do this in Figma |
+| --- | --- |
+| A tap target | Give it a prototype interaction, or name the layer, its component or its component set with a control word as the **last word** of a `/` segment: Button, Btn, Link, Tab, Toggle, Switch, Chip, Action, Row, Field, Input, CTA (`Primary Button`, `Tab / Today`, `Tab Bar Item`). |
+| A container that is NOT one big tap target | Don't end its name in a control word (`Action bar`, `Bottom bar`, `Trip tabs` are fine). A control-named layer that holds two or more controls is treated as a container anyway. |
+| A heading | Set the text in a text style whose name contains headline, heading, title or display, or start the layer name with "Heading". |
+| An image's alt text | The layer name of the node with the image fill (`Lisbon tram on Rua da Graça`, not `Rectangle 4`). |
+| An icon-only control's accessible name | The instance's layer name (`Close`, `Copy link`). A control that shows its own text needs nothing. |
+| A selected state | Use the component's `State=Selected` (or `Active`, `On`, `Checked`) variant. |
+| A bar pinned over scrolling content | A device-height frame with vertical overflow, the bar as its last child with `numberOfFixedChildren` covering it. On a screen that scrolls, only pinned controls are checked against the 34px home-indicator inset. |
+
+Also: `figma.createAutoLayout()` frames start with a white fill, so clear it on every layout container, and
+colours are token-checked exactly, so bind to the variables whose values are in `tokens.json`.
 
 ## Watching a run
 
@@ -202,10 +222,8 @@ than `~/Projects/design-loop`, set `DESIGN_LOOP_HOME`.
 
 ## Known limits in v1
 
-- **A Figma run reuses the Stitch calibration.** `calibrate`, `smoke` and `ab-distiller` still render
-  Stitch HTML in Chromium, so a Figma run's sigma is whatever the folder was calibrated at. Agent mode already
-  warns that it is uncalibrated; the same caveat applies with more force, since the page being measured is a
-  different kind of artefact.
+- **`smoke` and `ab-distiller` are Stitch-only.** `calibrate` measures Figma reference screens
+  (`reference/<name>.json`) natively in agent mode; the other two still render HTML in Chromium.
 - **Spacing literals are not token-checked.** Only colour, font size and border radius are compared against
   `tokens.json`; padding and margin are measured but never flagged.
 - **`batchMode: true` is rejected at load.** Batch critiquing is not implemented.
@@ -220,9 +238,9 @@ than `~/Projects/design-loop`, set `DESIGN_LOOP_HOME`.
 - **A critic must cite a selector that exists.** Issues citing anything else are dropped and counted as the
   critic's hallucination rate, which the report shows. On pages without ids the selectors are long
   positional paths, so expect a non-zero rate.
-- **Agent mode is not calibrated.** `calibrate` still runs through the API, so an agent-mode run
-  inherits an API-mode sigma and warns loudly about it. Its spend is not metered either: subagent
-  tokens never reach the CLI.
+- **Agent-mode spend is not metered.** Subagent tokens never reach the CLI. Calibrate agent-mode folders
+  with `calibrate` in agent mode: a sigma measured through the API describes a different committee, and a run
+  says so loudly.
 - **Agent mode cannot drop a critic.** In API mode, a critic that errors or fails validation is dropped
   from the round and the rest of the committee's weights are renormalised over the survivors. That path
   is only reachable by a critique that exists on disk and fails validation, and `SKILL.md` will not let

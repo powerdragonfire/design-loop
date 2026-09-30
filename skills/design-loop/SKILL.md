@@ -39,8 +39,12 @@ Below, `dl <command>` means that whole line.
 
 - `dl smoke` proves every live service works. Cost: about $0.30 and 2 Stitch generations. Ask before running it.
 - `run` refuses while `config.json` has `"sigma": null`. That means `dl calibrate` is needed first (about $2.20 at
-  the default 5 repeats). It reads `reference/` — three real Stitch outputs, `<name>.html` beside `<name>.png`. Ask
-  before running it, and again after any change to the critic model or weights.
+  the default 5 repeats). It reads `reference/` — three real outputs, `<name>.html` (Stitch) or `<name>.json` (a
+  Figma node tree, e.g. a run's `vNN/screen.json`) beside `<name>.png`. Ask before running it, and again after any
+  change to the critic model, the weights or the critic mode.
+- In `criticMode: "agent"`, `dl calibrate` exits 10 with a work order under `.design-loop/calibrate-agent/`
+  naming every critic for every repeat. Dispatch them exactly as for a run, then run `dl calibrate` again with the
+  same `--repeats` to compute sigma. A run whose sigma was measured in the other mode warns about it.
 
 ### 3. Run
 
@@ -53,8 +57,10 @@ and the stop reason, versions, spend and run directory (`<design>/runs/<date>-<s
 progress while it runs, read the background output; to see what happened after a crash, read
 `<runDir>/events.jsonl`. Don't kill a run that is only waiting.
 
-Stop reasons: `pass` (no open blockers or majors), `converged` (two rounds without a real improvement),
-`budget` (hit the round cap), `aborted` (exit 3 — saved versions are kept and still reviewable).
+Stop reasons: `pass` (no open blockers or majors), `converged` (two rounds that neither closed a blocker or
+major nor raised the composite past the noise floor), `budget` (hit the round cap), `aborted` (exit 3 — saved
+versions are kept and still reviewable). The committee's pick is the version with the fewest open blockers, then
+majors, then the highest composite — not simply the highest score.
 
 **In `criticMode: "agent"` the run stops after each generation and hands you the work instead.** The
 critics and the chair are subagents you dispatch; `dl run` cannot call them itself, so it suspends.
@@ -71,6 +77,12 @@ If the new agent types are not yet available to you, tell the user they may need
    `nextIssueId`, and nothing else. Dispatch at most `concurrency` at a time. Wait for all of them, then go
    back to 1.
 
+**If the user has asked for a workflow**, the tool ships one that does steps 1–3 for you:
+`.claude/workflows/design-loop-drive.js` in the tool's checkout, run with
+`{ scriptPath: "<tool>/.claude/workflows/design-loop-drive.js" }` and args `{ tool, designDir, runDir }` (or
+`screen` instead of `runDir` to start). It returns `done`, `failed`, `stuck` (the same critic failed twice: tell
+the user, as below), or `design` with the work order to build — build it, record the id, and run it again.
+
 **The one exception: a `"kind": "design"` order is yours to do, not a subagent's.** It appears only when
 `config.json` has `"generator": "figma"`. Its single unit has `"agent": null` because no `design-loop-*`
 agent can reach Figma — you can, through the Figma MCP. Load the `figma-use` skill (and `figma-generate-design`)
@@ -85,6 +97,18 @@ before touching the file, and follow the order's `instruction`:
   version, not the latest.
 - Write the new frame's node id — one plain id, `123:456` — to the unit's `output` (`vNN/screen-id.txt`), then
   `dl step`. Recording an id is the one file you write in a Figma run; it is the design, not a judgement of it.
+
+Build to what the loop can read (the README's "What the loop reads from your layers" has the full table):
+
+- **Names decide what is tappable.** A control's layer, component or component set ends a `/` segment in a
+  control word: Button, Link, Tab, Toggle, Switch, Chip, Action, Row, Field, Input, CTA. A container must NOT end
+  in one: `Bottom bar`, not `Action bar`; `Invite URL`, not `Invite link`; `Trip tabs`, not `Trip Tab Bar`.
+- **Accessibility comes from the file.** Headings: a headline/title text style. Image alt text and icon-only
+  control names: the layer name (never `Rectangle 4`). Selected state: the `State=Selected` variant.
+- **Pinned bars:** a 390×852 frame with vertical overflow, the bar its last child, `numberOfFixedChildren = 1`.
+- **Clear the white fill** `figma.createAutoLayout()` gives every new frame, and **bind colours to variables**
+  whose values are in `tokens.json` — token checks match exactly.
+- **Override component colours that are not variable-bound** (a header's raw title colour) on every instance.
 
 `step` reads the frame straight from Figma (needs `FIGMA_TOKEN`) and refuses an id equal to `editFrom`. If it
 exits 1 naming the id, fix `screen-id.txt` and step again — nothing was finalised.

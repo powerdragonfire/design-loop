@@ -78,7 +78,7 @@ export async function readCalibration(
     log?.(
       `WARNING: sigma was calibrated in ${cal.criticMode} mode but this run uses ${cfg.criticMode} mode. ` +
         "Tool-using critics score differently, so this run's stopping rule rests on a noise floor that does " +
-        "not describe it. Agent-mode calibration is not implemented yet; treat the stop reason with suspicion.",
+        "not describe it. Re-run `design-loop calibrate` in this mode; until then treat the stop reason with suspicion.",
     );
   }
   if (cfg.models.critic !== cal.criticModel) {

@@ -14,8 +14,8 @@ import { createStitchGenerator, type Generator } from "../stitch/adapter.js";
 import { createFigmaClient } from "../figma/client.js";
 import { FigmaGenerator, figmaMeasure } from "../figma/generator.js";
 import type { Config, MeasuredDoc } from "../types.js";
-import { defaultAgentsDir, syncAgents } from "./agents.js";
-import { abDistiller, calibrate } from "./calibrate.js";
+import { defaultAgentsDir, staleAgents, syncAgents } from "./agents.js";
+import { abDistiller, calibrate, calibrateAgent } from "./calibrate.js";
 import { inspectVersion } from "./inspect.js";
 import { createProgress, noProgress, promptLines, type Progress, type ProgressMode } from "./progress.js";
 import { runScreen } from "./run.js";
@@ -31,6 +31,8 @@ export interface Deps {
   buildReport: typeof buildReport;
   captureApproval: typeof captureApproval;
   calibrate: typeof calibrate;
+  /** `calibrate` for a folder whose critics are subagents: suspends on a work order until they have answered. */
+  calibrateAgent: typeof calibrateAgent;
   abDistiller: typeof abDistiller;
   smoke: typeof smoke;
   /** The generator a run uses. Given the design folder's config it picks Stitch or Figma; without one, Stitch. */
@@ -71,6 +73,7 @@ Commands:
   report <runDir>                    build the report page and open it
   approve <runDir> <vNN|cN>          record your pick for a run
   calibrate [--repeats N]            measure the composite's noise floor into config.json
+                                     (agent mode: exits 10 with a work order until the critics answer)
   ab-distiller                       list what the digest loses against the raw HTML
   inspect <versionDir>               look up measured nodes by --selector or --text
 
@@ -99,6 +102,7 @@ export function defaultDeps(designDir: string, io: Io, progress: Progress = noPr
     buildReport,
     captureApproval,
     calibrate,
+    calibrateAgent,
     abDistiller,
     smoke,
     makeGenerator: (config) =>
@@ -425,6 +429,24 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
         need(0, "no arguments");
         const repeats = values.repeats === undefined ? undefined : Number(values.repeats);
         if (repeats !== undefined && !Number.isInteger(repeats)) throw new UsageError(`--repeats must be a whole number (got ${values.repeats})`);
+        const config = await readConfig(designDir);
+        if (config?.criticMode === "agent") {
+          // The same refusal `step` makes: a critic briefed from an old rubric would calibrate the wrong standard.
+          const stale = await staleAgents({ outDir: agentsDir });
+          if (stale.length > 0) {
+            throw new Error(`these agent definitions are missing or out of date: ${stale.join(", ")}. Run \`design-loop sync-agents\`.`);
+          }
+          const a = await d.calibrateAgent({ designDir, repeats, measure: d.makeMeasure?.(config), log: (line) => io.out(line) });
+          if (!a.done) {
+            io.out(`Work order: ${a.workOrder}`);
+            io.out(`Dispatch the agents it names, then run calibrate again (with the same --repeats).`);
+            return 10;
+          }
+          io.out(`sigma ${a.sigma.toFixed(2)} over ${a.repeats} agent-mode repeats of ${a.screens.join(", ")} (written to ${join(designDir, "config.json")})`);
+          for (const [critic, s] of Object.entries(a.perCritic)) io.out(`  ${critic}: ${s.toFixed(2)}`);
+          io.out("Cost: not metered (agent mode)");
+          return 0;
+        }
         const r = await d.calibrate({ designDir, llm: d.makeLlm(), repeats, log: (line) => io.out(line), progress });
         io.out(`sigma ${r.sigma.toFixed(2)} over ${r.repeats} repeats of ${r.screens.join(", ")} (written to ${join(designDir, "config.json")})`);
         for (const [critic, s] of Object.entries(r.perCritic)) io.out(`  ${critic}: ${s.toFixed(2)}`);

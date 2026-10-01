@@ -71,6 +71,23 @@ export class FigmaClient {
     };
   }
 
+  /**
+   * Whether the token can read this file and, given one, that node: its name and type, at depth 1 so a page
+   * of fifty frames costs one small response instead of every frame's subtree. For `check`, never for a run.
+   */
+  async probe(nodeId?: string): Promise<{ name: string; type: string }> {
+    const key = encodeURIComponent(this.fileKey);
+    if (nodeId === undefined) {
+      const body = await this.getJson(`/files/${key}?depth=1`, "file");
+      return { name: String(body["name"] ?? ""), type: "FILE" };
+    }
+    const body = await this.getJson(`/files/${key}/nodes?ids=${encodeURIComponent(nodeId)}&depth=1`, `node ${nodeId}`);
+    const nodes = body["nodes"] as Record<string, { document?: FigmaNode } | null | undefined> | undefined;
+    const doc = nodes?.[nodeId]?.document;
+    if (!doc) throw new Error(`Figma has no node ${nodeId} in this file`);
+    return { name: doc.name ?? "", type: doc.type ?? "" };
+  }
+
   /** A rendered PNG of the node. Two hops: ask for a signed URL, then download it. */
   async getImage(nodeId: string, scale = 2): Promise<Buffer> {
     const body = await this.getJson(

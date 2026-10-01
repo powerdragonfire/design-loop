@@ -1,6 +1,6 @@
 ---
 name: design-loop
-description: Use when the user wants to generate or refine a mobile screen design with Google Stitch and have it critiqued and iterated automatically — "design this screen", "run design-loop", "critique this Stitch design", "approve a design version", "calibrate design-loop". Runs the design-loop CLI, reads its report, and leaves the approval decision to the user.
+description: Use when the user wants to generate or refine a mobile screen design with Google Stitch or Figma and have it critiqued and iterated automatically — "design this screen", "run design-loop", "critique this Stitch design", "approve a design version", "calibrate design-loop". For a first-time setup use /design-setup; to write a new screen's spec use /start-design. Runs the design-loop CLI, reads its report, and leaves the approval decision to the user.
 ---
 
 # design-loop
@@ -26,7 +26,10 @@ Below, `dl <command>` means that whole line.
 
 ### 1. Preflight (free, do every time)
 
-- Credentials, checked without printing them:
+- Run `dl check <screen>`. It lists every failing precondition with its fix: contract, screen spec, sigma, agent
+  files, and for Figma the token, file and page. Fix every `FAIL` before `run`. If the folder was never set up,
+  point the user at `/design-setup`. If the screen has no spec, point them at `/start-design`.
+- Stitch credentials (a Figma run needs only `FIGMA_TOKEN`, which `check` covers), checked without printing them:
   `for v in STITCH_PROJECT_ID ANTHROPIC_API_KEY STITCH_API_KEY; do printenv "$v" >/dev/null && echo "$v set" || echo "$v MISSING"; done`
   Stitch also accepts `STITCH_ACCESS_TOKEN` + `GOOGLE_CLOUD_PROJECT` in place of `STITCH_API_KEY`. `ANTHROPIC_API_KEY`
   may be replaced by an `ant auth login` profile. Never echo, log or write a key. If one is missing, tell the user which
@@ -50,6 +53,10 @@ Below, `dl <command>` means that whole line.
 
 Tell the user the cost first: **about $1–2 per screen** plus Stitch generations from the free-tier pool (edits count).
 On their yes:
+
+Pass on any flags `/start-design` printed: `--direction N` (which art direction to start from), `--from <nodeId>`
+(Figma: score an existing frame as v00) or `--seed <nodeId>` (Figma: build v00 by duplicating that frame). They are
+fixed at the first step and stored in the run's `start.json`; `step` never takes them.
 
 `dl run <screen>` — use `run_in_background` and the maximum timeout; a run takes minutes. It prints timestamped
 step lines on stderr as it goes (`stitch generate`, `critics`, `chair`, and a `… still waiting` heartbeat every 30s),

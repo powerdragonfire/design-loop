@@ -40,6 +40,8 @@ export interface RunOptions {
    * earlier process claimed, so it must hand over that directory rather than let this one claim a new `-2`.
    */
   run?: Run;
+  /** The art direction to start from, by its index in the screen's directions; 0 when unset. */
+  direction?: number;
 }
 
 export interface RunResult {
@@ -173,7 +175,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   // candidate this stage already paid for is written nowhere (spec fix 3).
   const candidateStage = async (): Promise<Seed> => {
     const { winner, rows } = await selectCandidate({
-      contract, screen, designDir, generator, cfg, progress, llm, sigma, measure: measureDoc,
+      contract, screen, designDir, generator, cfg, progress, llm, sigma, measure: measureDoc, direction: opts.direction,
       onDegraded: (critic, error, id) => degradations.push({ version: id, critic, error }),
       onCandidate: async (row) => {
         await run.writeCandidate({
@@ -248,7 +250,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   const agentRoundZero = async (): Promise<Seed> => {
     const version = versionName(0);
     // The first family's direction, exactly as the candidate stage gives its one seed.
-    const direction = (await readDirections(designDir, screen))[0];
+    const direction = (await readDirections(designDir, screen, opts.direction))[0];
     const base = buildFirstPrompt(contract, screen);
     const prompt = direction ? `${base}\n\nArt direction: ${direction}` : base;
     progress.banner(`${version} · first generation`, {

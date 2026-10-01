@@ -37,6 +37,9 @@ design/
   directions/<name>.md optional: the same, for one screen only; read before directions.md
   reference/           three real outputs, <name>.html (Stitch) or <name>.json (a Figma node tree) beside
                        <name>.png, for calibrate
+  project.json         optional, written by /design-setup: the app, its repo, its DESIGN.md, the Figma
+                       target and components pages, and which component sources briefs may draw from.
+                       Read by the skills and `check`; nothing in it changes how a run behaves
   .design-loop/        written by the tool: quota.json, calibration.json
   runs/<date>-<screen>/  one directory per run:
     candidates/<id>/      every candidate stage row (screenshot, HTML, critiques), plus selection.json
@@ -47,11 +50,15 @@ design/
 
 | Command | What it does | Cost |
 | --- | --- | --- |
+| `check [screen] [--json] [--offline]` | Lists everything a run needs, one row each, and what to run to fix it: the contract (config, tokens, brief), the screen spec, sigma and its calibration, the agent files, the Figma token, file and page (one small read; `--offline` skips it), `project.json`, whether `brief.md` carries a `DESIGN.md`'s rules, and the skills. Exit 1 on any failure. `--json` is for the skills. | free |
 | `smoke` | Calls every live service once — a critic call, the same call again to prove the prompt cache hits, a chair call, a Stitch generate AND edit, then `measure()` on the real Stitch page — and prints PASS/FAIL/SKIP per step. Run it first. | 2 Stitch generations, ~$0.30 |
 | `calibrate [--repeats N]` | Scores each `reference/` screen N times and writes the composite's noise floor into `config.json` as `sigma`, plus `.design-loop/calibration.json` (which records the critic mode it was measured in). Re-run it after changing the critic model, the weights or the critic mode. In `criticMode: "agent"` it works like `step`: it writes one `work-order.json` under `.design-loop/calibrate-agent/` naming every critic for every repeat, exits 10, and once they have answered, run it again (same `--repeats`) to compute sigma. | ~$2.20 at 5 repeats; not metered in agent mode |
 | `ab-distiller` | Critiques each reference screen twice, once from the digest and once from raw HTML, and lists the claims only the raw HTML produced. Whatever it lists is a field `measure`'s `STYLE_PROPS` is missing. | ~$8 |
 | `sync-agents [--agents-dir <dir>]` | Writes `design-loop-<critic>.md` and the chair's agent file from the critic rubrics baked into this build, into `~/.claude/agents/` so Claude Code finds them from any project. Agent mode only — `run`/`step` refuse to dispatch a subagent against a stale one, and check the same directory (pass them the same `--agents-dir` if you override it). Re-run it after upgrading. The copies under this repo's `.claude/agents/` are a reference, not what is dispatched. | free |
 | `run <screen> [--date YYYY-MM-DD]` | Generates `families × (1 + variantsPerFamily)` candidates (config's `candidates` section — see [Generating more than one candidate](#generating-more-than-one-candidate); the default, `families: 1, variantsPerFamily: 0`, is one generation, today's behaviour), scores and selects one, promotes it to `v00`, then the edit loop. In `criticMode: "api"` it runs to completion, showing each step live, then prints the stop reason, the versions, the spend and the report path. In `criticMode: "agent"` it IS the first `step`: with the default single candidate it generates `v00`, suspends on its critics and exits 10. Agent mode refuses a config that asks for more than one candidate (see Known limits). | ~$1.06 per screen by default; ~$2.30 with the six-candidate example below, see the caveat there; not metered in agent mode |
+| `run <screen> --direction N` | Starts from art direction N of `directions/<screen>.md` instead of the first. A Figma or agent-mode run has one candidate, so this is how it explores directions: one run per direction, compared in their reports. | as `run` |
+| `run <screen> --from <nodeId>` | Figma: improve a frame that already exists. It is read and scored as `v00`, with no design order; every edit duplicates it, so the original is never changed. | as `run` |
+| `run <screen> --seed <nodeId>` | Figma: a missing state of an existing screen. `v00`'s design order says to duplicate this frame and apply the spec to the copy, instead of building from nothing. | as `run` |
 | `step <runDir>` | Advances a suspended agent-mode run by one round. Everything already answered on disk is replayed for free; the first thing nobody has answered yet stops the run again and writes a `work-order.json` naming which subagents to dispatch. Keep calling it until it exits 0 — or let the `design-loop-drive` workflow (`.claude/workflows/`) step and dispatch for you; it returns at each Figma design order. | free (the round's own Stitch generation aside) |
 | `inspect <versionDir> [--selector <css> \| --text <substring>]` | Looks up measured nodes from a version's digest by selector or text, for a person checking a critic's claim against the real page. Agent-mode critics have no shell; they read the same `vNN/digest.json` directly. | free |
 | `review <runDir>` | Builds the report, opens it, and asks which version to approve. | free |
@@ -202,10 +209,20 @@ critic claude-sonnet-5 · chair claude-opus-5 · sigma 1.8 · up to 5 edits
 
 ## Claude Code skill
 
-`skills/design-loop/SKILL.md` lets Claude drive this CLI for you. Install it once:
+Three skills let Claude drive this tool for you:
+
+- `/design-setup` asks which app you are designing, connects its Figma file and pages, folds a `DESIGN.md` into
+  `brief.md`, writes `project.json`, and stops when `check` is green.
+- `/start-design` is the brief. It asks what kind of work this is (a new screen, improving an existing frame, the
+  missing states of a screen, or porting a screen from the app's code), the content, and two or three
+  component-source directions. It then writes `screens/<name>.md` and `directions/<name>.md` and prints one `run`
+  command per direction.
+- `design-loop` runs the loop, summarises the report, and waits for you to approve.
+
+### Install the skills
 
 ```
-ln -s "$PWD/skills/design-loop" ~/.claude/skills/design-loop
+for s in design-loop design-setup start-design; do ln -s "$PWD/skills/$s" ~/.claude/skills/$s; done
 ```
 
 Then ask Claude to "design the home screen with design-loop". It runs the commands above, summarises the report,

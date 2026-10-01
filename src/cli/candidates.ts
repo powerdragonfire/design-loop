@@ -24,8 +24,12 @@ const readIfThere = (file: string): Promise<string | null> =>
  * `directions/<screen>.md` is read first, then the folder-wide `directions.md`. Directions are usually written
  * for one screen ("Tile grid … Account, Albums"), and a folder-wide file handed them to every screen in the
  * folder. A missing file is not an error: a design folder that has not opted in runs one family with no rider.
+ *
+ * `first` puts that direction first, keeping the rest in order after it: family 0 — the only family a Figma or
+ * agent-mode run has — then takes it, so one run per direction (`run --direction N`) is how such a folder
+ * explores its directions. Out of range is an error rather than a silent fall back to direction 0.
  */
-export async function readDirections(designDir: string, screen?: string): Promise<string[]> {
+export async function readDirections(designDir: string, screen?: string, first?: number): Promise<string[]> {
   const raw =
     (screen !== undefined ? await readIfThere(join(designDir, "directions", `${screen}.md`)) : null) ??
     (await readIfThere(join(designDir, "directions.md")));
@@ -38,7 +42,13 @@ export async function readDirections(designDir: string, screen?: string): Promis
     const prose = section.trim();
     if (prose !== "") out.push(prose);
   }
-  return out;
+  if (first === undefined || first === 0) return out;
+  if (!Number.isInteger(first) || first < 0 || first >= out.length) {
+    throw new Error(
+      `no direction ${first}: ${out.length === 0 ? "this screen has no directions" : `directions are numbered 0 to ${out.length - 1}`}`,
+    );
+  }
+  return [...out.slice(first), ...out.slice(0, first)];
 }
 
 export interface Candidate {
@@ -55,6 +65,8 @@ export interface GenerateOptions {
   generator: Generator;
   cfg: Config;
   progress: Progress;
+  /** The direction family 0 takes; see `readDirections`. */
+  direction?: number;
 }
 
 /**
@@ -64,7 +76,7 @@ export interface GenerateOptions {
  */
 export async function generateCandidates(opts: GenerateOptions): Promise<Candidate[]> {
   const { contract, screen, designDir, generator, cfg, progress } = opts;
-  const directions = await readDirections(designDir, screen);
+  const directions = await readDirections(designDir, screen, opts.direction);
   const base = buildFirstPrompt(contract, screen);
   const { families, variantsPerFamily, creativeRange, aspects } = cfg.candidates;
   const out: Candidate[] = [];

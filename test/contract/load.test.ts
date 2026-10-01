@@ -48,6 +48,44 @@ describe("loadContract", () => {
     await expect(loadContract(FIX, { criticMode: "agent" })).resolves.toBeDefined();
   });
 
+  describe("generator", () => {
+    const figma = { fileKey: "Hd1q4ePvrHOmZerZZNmk9b", pageId: "266:2" };
+
+    it("defaults to stitch, so an existing design folder behaves exactly as before", async () => {
+      const c = await loadContract(FIX);
+      expect(c.config.generator).toBe("stitch");
+      expect(c.config.figma).toBeUndefined();
+    });
+
+    it("accepts figma in agent mode with a figma block", async () => {
+      const c = await loadContract(FIX, { criticMode: "agent", generator: "figma", figma });
+      expect(c.config.generator).toBe("figma");
+      expect(c.config.figma).toEqual(figma);
+    });
+
+    it("refuses figma outside agent mode, naming the fix", async () => {
+      await expect(loadContract(FIX, { generator: "figma", figma }))
+        .rejects.toThrow(/Figma generator runs in agent mode.*"criticMode": "agent"/);
+    });
+
+    it("refuses figma without a figma block", async () => {
+      await expect(loadContract(FIX, { criticMode: "agent", generator: "figma" }))
+        .rejects.toThrow(/needs a "figma" block naming the file/);
+    });
+
+    it("rejects an unknown generator and unknown keys in the figma block", async () => {
+      await expect(loadContract(FIX, { generator: "pencil" as never }))
+        .rejects.toThrow(/invalid config\.json.*generator/s);
+      await expect(loadContract(FIX, { criticMode: "agent", generator: "figma", figma: { ...figma, token: "x" } as never }))
+        .rejects.toThrow(/invalid config\.json.*figma/s);
+    });
+
+    it("still refuses multiple candidates for a figma run, since it is agent mode", async () => {
+      await expect(loadContract(FIX, { criticMode: "agent", generator: "figma", figma, candidates: { families: 2 } }))
+        .rejects.toThrow(/agent mode does not yet support multiple candidates/);
+    });
+  });
+
   it("defaults the candidates block to today's single generation", async () => {
     const { config } = await loadContract(FIX);
     expect(config.candidates).toEqual({ families: 1, variantsPerFamily: 0, creativeRange: "EXPLORE", aspects: [] });

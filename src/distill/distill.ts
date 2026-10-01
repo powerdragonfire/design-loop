@@ -16,7 +16,7 @@ function line(n: MeasuredNode): string {
   // resolves it against doc.nodes[].selector. JSON.stringify keeps the text on one line.
   return [
     n.selector,
-    `<${n.tag}${n.role ? ` role=${n.role}` : ""}>`,
+    `<${n.tag}${n.role ? ` role=${n.role}` : ""}${n.label ? ` aria-label=${JSON.stringify(n.label)}` : ""}${n.selected ? " aria-selected=true" : ""}>`,
     // Containment is otherwise recoverable only by bbox inclusion, which is
     // implicit and costly for an LLM; depth is the cheap structural skeleton.
     n.depth !== undefined ? `d=${n.depth}` : "",

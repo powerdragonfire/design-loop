@@ -1,15 +1,16 @@
 import { mkdir, readFile, readdir } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { loadContract } from "../contract/load.js";
 import { measure } from "../measure/measure.js";
 import { deterministicCritique } from "../critics/deterministic.js";
 import { distill } from "../distill/distill.js";
-import { runCommittee, type CriticInput, type LlmClient } from "../critics/llm.js";
+import { LLM_CRITICS, runCommittee, type CriticInput, type LlmClient } from "../critics/llm.js";
+import { AgentLlmClient, WorkOrderPending } from "../critics/agent.js";
 import { composite, renormalise } from "../scoring/score.js";
-import { writeAtomic } from "../store/store.js";
+import { sourceFile, versionName, writeAtomic } from "../store/store.js";
 import { costUsd } from "./pricing.js";
 import { committeeHooks, noProgress, type Progress } from "./progress.js";
-import type { Config, Contract, CriticName, Usage } from "../types.js";
+import type { Config, Contract, CriticName, MeasuredDoc, Usage } from "../types.js";
 
 export interface CalibrationResult {
   sigma: number;
@@ -48,18 +49,23 @@ const addUsage = (total: Usage, more: Usage | undefined): void => {
   total.cachedTokens += more.cachedTokens;
 };
 
-/** Every `<name>.html` under `<designDir>/reference/` with the `<name>.png` beside it, sorted by name. */
+/**
+ * Every `<name>.html` under `<designDir>/reference/` with the `<name>.png` beside it, sorted by name. A Figma
+ * design folder's reference screens are node trees, so `<name>.json` is read the same way.
+ */
 async function readReference(designDir: string): Promise<ReferenceScreen[]> {
   const refDir = join(designDir, "reference");
   const files = await readdir(refDir).catch(() => [] as string[]);
-  const names = files.filter((f) => f.endsWith(".html")).map((f) => basename(f, ".html")).sort();
-  if (names.length === 0) throw new Error(`no reference screens in ${refDir}`);
+  const sources = files.filter((f) => f.endsWith(".html") || f.endsWith(".json")).sort();
+  if (sources.length === 0) throw new Error(`no reference screens in ${refDir}`);
   const screens: ReferenceScreen[] = [];
-  for (const screen of names) {
+  for (const file of sources) {
+    const screen = basename(file, extname(file));
+    if (screens.some((s) => s.screen === screen)) throw new Error(`reference screen ${screen} has both an .html and a .json`);
     const png = await readFile(join(refDir, `${screen}.png`)).catch(() => {
-      throw new Error(`reference screen ${screen}.html has no ${screen}.png beside it`);
+      throw new Error(`reference screen ${file} has no ${screen}.png beside it`);
     });
-    screens.push({ screen, html: await readFile(join(refDir, `${screen}.html`), "utf8"), png });
+    screens.push({ screen, html: await readFile(join(refDir, file), "utf8"), png });
   }
   return screens;
 }
@@ -159,10 +165,21 @@ export async function calibrate(opts: {
     log?.(`${screen}: ${repeats} repeats, composite ${Math.min(...scores).toFixed(1)}..${Math.max(...scores).toFixed(1)}`);
   }
 
+  const screens = reference.map((s) => s.screen);
+  const { sigma, perCritic } = await recordCalibration(designDir, cfg, composites, raw, repeats, screens);
+  return { sigma, perCritic, repeats, screens, usd: pricedTotal(cfg, llm, usage) };
+}
+
+/**
+ * Turns the per-screen scores into sigma, and writes it where a run reads it: `calibration.json` (with the critic
+ * mode it was measured in, so a run in the other mode is warned) and `config.json`'s `sigma`.
+ */
+async function recordCalibration(
+  designDir: string, cfg: Config, composites: number[][], raw: Map<CriticName, number[][]>, repeats: number, screens: string[],
+): Promise<{ sigma: number; perCritic: Record<string, number> }> {
   const sigma = withinScreenStd(composites);
   const perCritic: Record<string, number> = {};
   for (const [critic, perScreen] of raw) perCritic[critic] = withinScreenStd(perScreen);
-  const screens = reference.map((s) => s.screen);
 
   await writeEvidence(designDir, "calibration.json", {
     sigma,
@@ -170,6 +187,7 @@ export async function calibrate(opts: {
     repeats,
     screens,
     criticModel: cfg.models.critic,
+    criticMode: cfg.criticMode,
     weights: cfg.weights,
     measuredAt: new Date().toISOString(),
   });
@@ -178,8 +196,135 @@ export async function calibrate(opts: {
   const rawConfig = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
   rawConfig.sigma = sigma;
   await writeAtomic(configPath, JSON.stringify(rawConfig, null, 2) + "\n");
+  return { sigma, perCritic };
+}
 
-  return { sigma, perCritic, repeats, screens, usd: pricedTotal(cfg, llm, usage) };
+/** Where agent-mode calibration keeps its inputs and the subagents' answers: `<screen>/vNN/` per repeat. */
+export const agentCalibrationDir = (designDir: string): string => join(designDir, ".design-loop", "calibrate-agent");
+
+export type AgentCalibration = ({ done: true } & CalibrationResult) | { done: false; workOrder: string };
+
+/**
+ * `calibrate` for `criticMode: "agent"`. The critics are subagents this process cannot call, so it works as `step`
+ * does: every reference screen gets one directory per repeat holding what a critic reads, and while any answer is
+ * missing it writes ONE work order naming every critic in every repeat and returns. Called again once they have
+ * answered, it reads the answers back and measures sigma exactly as the API path does.
+ *
+ * Each repeat is a separate subagent reading identical inputs, so the spread between them is the noise an
+ * agent-mode run's stop rule has to see past — which is what an API-mode sigma never measured.
+ */
+export async function calibrateAgent(opts: {
+  designDir: string;
+  repeats?: number;
+  measure?: (html: string) => Promise<MeasuredDoc>;
+  log?: (line: string) => void;
+}): Promise<AgentCalibration> {
+  const { designDir, log } = opts;
+  const repeats = opts.repeats ?? DEFAULT_REPEATS;
+  if (!Number.isInteger(repeats) || repeats < 2) {
+    throw new Error(`repeats must be an integer >= 2 (got ${repeats}): one sample has no spread`);
+  }
+  const contract = await loadContract(designDir, {}, undefined, { allowNullSigma: true });
+  const cfg = contract.config;
+  if (cfg.criticMode !== "agent") throw new Error('calibrateAgent needs "criticMode": "agent"');
+  const reference = await readReference(designDir);
+  const measureDoc = opts.measure ?? measure;
+  const workDir = agentCalibrationDir(designDir);
+
+  const units: unknown[] = [];
+  const composites: number[][] = [];
+  const raw = new Map<CriticName, number[][]>();
+
+  for (const { screen, html, png } of reference) {
+    const doc = await measureDoc(html);
+    const det = deterministicCritique(doc, contract.tokens);
+    const digest = distill(doc);
+    const measurements = det.critique.issues.filter((i) => !i.id.startsWith("det-token-"));
+    const source = sourceFile(html);
+    const input: CriticInput = { contract, screen, digest, imagePng: png, openIssues: [], measurements };
+    const screenDir = join(workDir, screen);
+    const scores: number[] = [];
+    const perCritic = new Map<CriticName, number[]>();
+
+    for (let r = 0; r < repeats; r++) {
+      const version = versionName(r);
+      const dir = join(screenDir, version);
+      await mkdir(join(dir, "inbox"), { recursive: true });
+      await Promise.all([
+        writeAtomic(join(dir, "digest.txt"), digest),
+        writeAtomic(join(dir, "digest.json"), JSON.stringify(doc, null, 2)),
+        writeAtomic(join(dir, "screen.png"), png),
+        writeAtomic(join(dir, source), html),
+        writeAtomic(join(dir, "carried-issues.json"), "[]\n"),
+        writeAtomic(join(dir, "measurements.json"), JSON.stringify(measurements, null, 2)),
+      ]);
+
+      const client = new AgentLlmClient({ runDir: screenDir, cursor: { index: r } });
+      const committee = await runCommittee(input, cfg, client);
+      try {
+        client.throwIfPending();
+      } catch (err) {
+        if (!(err instanceof WorkOrderPending)) throw err;
+        const rel = (file: string): string => `${screen}/${version}/${file}`;
+        for (const u of err.units) {
+          units.push({
+            critic: u.critic,
+            agent: `design-loop-${u.critic}`,
+            output: rel(`inbox/${u.critic}.json`),
+            nextIssueId: u.nextIssueId,
+            inputs: {
+              digest: rel("digest.txt"),
+              screenshot: rel("screen.png"),
+              ...(source === "screen.json" ? { nodeTree: rel(source) } : { html: rel(source) }),
+              // No screen spec: a reference screen is judged against the brief and tokens alone, as the API path does.
+              screenSpec: null,
+              brief: "brief.md",
+              tokens: "tokens.json",
+              carriedIssues: rel("carried-issues.json"),
+              measurements: u.critic === "accessibility" ? rel("measurements.json") : null,
+            },
+          });
+        }
+        continue;
+      }
+      // Same refusal as the API path: a repeat scored on fewer critics is rescaled, which would inflate sigma.
+      if (committee.failures.length > 0) {
+        throw new Error(
+          `calibration aborted: ${screen}, repeat ${r + 1}: ${committee.failures.map((f) => `${f.critic}: ${f.error}`).join("; ")}. ` +
+            `Fix or re-dispatch that critic's answer under ${dir}/inbox/ and run calibrate again.`,
+        );
+      }
+      const scored = [...committee.critiques, det.critique];
+      scores.push(composite(scored, renormalise(cfg.weights, scored.map((c) => c.critic))));
+      for (const c of committee.critiques) perCritic.set(c.critic, [...(perCritic.get(c.critic) ?? []), c.score]);
+    }
+    if (scores.length === repeats) {
+      composites.push(scores);
+      for (const [critic, s] of perCritic) raw.set(critic, [...(raw.get(critic) ?? []), s]);
+      log?.(`${screen}: ${repeats} repeats, composite ${Math.min(...scores).toFixed(1)}..${Math.max(...scores).toFixed(1)}`);
+    }
+  }
+
+  if (units.length > 0) {
+    const file = join(workDir, "work-order.json");
+    // Ordered as a run's work order is: by screen, repeat, then the committee's own critic order.
+    const order = (u: any): string => `${u.output.split("/inbox/")[0]}/${LLM_CRITICS.indexOf(u.critic)}`;
+    units.sort((a, b) => (order(a) < order(b) ? -1 : order(a) > order(b) ? 1 : 0));
+    await writeAtomic(file, `${JSON.stringify({
+      kind: "critics",
+      version: "calibration",
+      screen: reference.map((s) => s.screen).join(", "),
+      designDir: resolve(designDir),
+      runDir: resolve(workDir),
+      concurrency: 4,
+      units,
+    }, null, 2)}\n`);
+    return { done: false, workOrder: file };
+  }
+
+  const screens = reference.map((s) => s.screen);
+  const { sigma, perCritic } = await recordCalibration(designDir, cfg, composites, raw, repeats, screens);
+  return { done: true, sigma, perCritic, repeats, screens, usd: null };
 }
 
 const contentWords = (claim: string): Set<string> =>

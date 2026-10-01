@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { DesignPending } from "../figma/generator.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
-import { versionName, type Run, type RoundCursor, type VersionHandle } from "../store/store.js";
+import { readSource, versionName, type Run, type RoundCursor, type VersionHandle } from "../store/store.js";
 import type { MeasuredDoc } from "../types.js";
 
 // Re-exported so a caller wiring the loop up reaches for one module, not two. `versionName` and `RoundCursor`
@@ -34,7 +35,7 @@ export async function listVersions(runDir: string): Promise<string[]> {
 }
 
 /** null for a file that is simply not there; any other failure is a real one and is not swallowed. */
-const readOptional = async (file: string): Promise<string | null> =>
+export const readOptional = async (file: string): Promise<string | null> =>
   readFile(file, "utf8").catch((err: NodeJS.ErrnoException) => (missing(err) ? null : Promise.reject(err)));
 
 /**
@@ -54,8 +55,16 @@ export function resumingGenerator(opts: { runDir: string; inner: Generator; curs
     return {
       id: screen.id,
       // An edit is the next round's generate-or-edit, so it goes through `acquire` too and may itself replay.
-      edit: (prompt) => acquire(() => screen.edit(prompt)),
-      getHtml: fromDisk ? () => readFile(join(dir, "screen.html"), "utf8") : () => screen.getHtml(),
+      // It passes its own index as the parent: after a regression the loop edits the BEST version's handle,
+      // so the version this edit builds on is this handle's, not "the new one minus one".
+      edit: (prompt) => acquire(() => screen.edit(prompt), index),
+      getHtml: fromDisk
+        ? async () => {
+            const stored = await readSource(dir);
+            if (stored === null) throw new Error(`${versionName(index)} has a screen id but no stored screen source`);
+            return stored.content;
+          }
+        : () => screen.getHtml(),
       getImage: fromDisk ? () => readFile(join(dir, "screen.png")) : () => screen.getImage(),
     };
   };
@@ -64,7 +73,7 @@ export function resumingGenerator(opts: { runDir: string; inner: Generator; curs
    * `live` is a thunk, not a promise: on a replayed round it is never invoked, which is what makes the round
    * cost nothing. The cursor moves here and nowhere else, so it is written exactly once per round.
    */
-  const acquire = async (live: () => Promise<Screen>): Promise<Screen> => {
+  const acquire = async (live: () => Promise<Screen>, parentIndex: number | null): Promise<Screen> => {
     const index = next++;
     cursor.index = index;
     const stored = await readOptional(join(runDir, versionName(index), "screen-id.txt"));
@@ -78,13 +87,24 @@ export function resumingGenerator(opts: { runDir: string; inner: Generator; curs
     if (id && inner.fromId) {
       return wrap(index, inner.fromId(id), true);
     }
-    return wrap(index, await live(), false);
+    let fresh: Screen;
+    try {
+      fresh = await live();
+    } catch (err) {
+      // A Figma generator cannot know which round it is on; this layer is the one place that does. The work
+      // order must name the version directory the operator's answer goes in, and the frame it builds on.
+      if (err instanceof DesignPending) {
+        throw err.at(versionName(index), parentIndex === null ? null : versionName(parentIndex));
+      }
+      throw err;
+    }
+    return wrap(index, fresh, false);
   };
 
   return {
     // No `fromId`: a handle rebuilt through it would skip `acquire`, so its `edit` would not advance the cursor
     // and the next round would be generated again instead of replayed. `generate` is the only way in.
-    generate: (prompt) => acquire(() => inner.generate(prompt)),
+    generate: (prompt) => acquire(() => inner.generate(prompt), null),
     // Variants are not replayable: they have no version directory to be served from and no cursor slot, so
     // passing them through would re-pay Stitch on every step. This should be unreachable: loadContract refuses
     // agent mode with more than one candidate, and run.ts routes a single-candidate agent run around the
@@ -121,8 +141,8 @@ export function resumingMeasure(opts: {
   const build = async (): Promise<Map<string, string>> => {
     const map = new Map<string, string>();
     for (const version of await listVersions(runDir)) {
-      const stored = await readOptional(join(runDir, version, "screen.html"));
-      if (stored !== null) map.set(sha(stored), version);
+      const stored = await readSource(join(runDir, version));
+      if (stored !== null) map.set(sha(stored.content), version);
     }
     return map;
   };

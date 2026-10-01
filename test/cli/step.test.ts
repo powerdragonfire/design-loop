@@ -3,7 +3,8 @@ import { mkdtempSync, cpSync, readFileSync, writeFileSync, existsSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stepRun } from "../../src/cli/step.js";
-import { FakeGenerator } from "../../src/stitch/adapter.js";
+import { FakeGenerator, type Generator, type Screen } from "../../src/stitch/adapter.js";
+import { DesignPending } from "../../src/figma/generator.js";
 import type { CriticName } from "../../src/types.js";
 
 const FIX = new URL("../fixtures/design/", import.meta.url).pathname;
@@ -212,6 +213,94 @@ describe("stepRun", () => {
   // Agent mode has no way yet to brief a subagent on a candidate: work orders, the round cursor and the resume
   // layer all key on `vNN/`. A config asking for more than one candidate is refused rather than quietly run
   // with one, and refused before Stitch is asked for anything, because every generation is paid for.
+  describe("design work orders", () => {
+    const FIGMA = { fileKey: "Hd1q4ePvrHOmZerZZNmk9b", pageId: "266:2" };
+    const readOrder = (out: unknown) =>
+      JSON.parse(readFileSync((out as { workOrder: string }).workOrder, "utf8"));
+
+    /** Cannot create a frame: suspends on every generation, like FigmaGenerator. */
+    const designer = (): Generator => ({
+      generate: async (p) => { throw new DesignPending(p, null); },
+      variants: async () => [],
+    });
+
+    /**
+     * Generates round 0 like Stitch (so the round can be measured and scored without a real Figma file) but
+     * suspends on every edit, as a Figma frame must. `fromId` lets the resume layer rebuild v00 on replay.
+     */
+    const hybrid = (): Generator => {
+      const inner = new FakeGenerator([shot(48)]);
+      const figmaEdits = (s: Screen): Screen => ({
+        id: s.id,
+        edit: async (p) => { throw new DesignPending(p, s.id); },
+        getHtml: () => s.getHtml(),
+        getImage: () => s.getImage(),
+      });
+      return {
+        generate: async (p) => figmaEdits(await inner.generate(p)),
+        variants: async () => [],
+        fromId: (id) => figmaEdits(inner.fromId!(id)),
+      };
+    };
+
+    it("suspends a first generation with a design order that names no subagent", async () => {
+      const designDir = setup();
+      const out = await stepRun({ designDir, screen: "home", date: DATE, generator: designer(), figma: FIGMA });
+      expect(out.done).toBe(false);
+      expect((out as { kind?: string }).kind).toBe("design");
+
+      const order = readOrder(out);
+      expect(order.kind).toBe("design");
+      expect(order.version).toBe("v00");
+      expect(order.figma).toEqual(FIGMA);
+      expect(order.instruction).toMatch(/Build a new frame on page 266:2/);
+      expect(order.units).toHaveLength(1);
+      const [unit] = order.units;
+      expect(unit.agent).toBeNull();
+      expect(unit.output).toBe("v00/screen-id.txt");
+      expect(unit.inputs.editFrom).toBeNull();
+      expect(unit.inputs.editFromVersion).toBeNull();
+
+      const runDir = join(designDir, "runs", `${DATE}-home`);
+      // The first-generation prompt, in full: brief, tokens and this screen's spec.
+      expect(readFileSync(join(runDir, "v00", "design-prompt.txt"), "utf8")).toContain("Screen to design:");
+      expect(existsSync(join(runDir, "manifest.json"))).toBe(false);
+    });
+
+    it("can be stepped again before the frame exists, and simply asks again", async () => {
+      // Proves the run it left behind is re-openable: `openExistingRun` refuses a run with no vNN directory.
+      const designDir = setup();
+      const first = await stepRun({ designDir, screen: "home", date: DATE, generator: designer() });
+      const again = await stepRun({ designDir, screen: "home", date: DATE, runDir: first.runDir, generator: designer() });
+      expect(again.done).toBe(false);
+      expect(readOrder(again).version).toBe("v00");
+    });
+
+    it("hands an edit back naming the frame to duplicate, its version and its screenshot", async () => {
+      const designDir = setup();
+      await stepRun({ designDir, screen: "home", date: DATE, generator: hybrid() });
+      const runDir = join(designDir, "runs", `${DATE}-home`);
+      for (const c of CRITICS) answer(runDir, "v00", c, 60, c === "typography" ? [major("t-1")] : []);
+      await stepRun({ designDir, screen: "home", date: DATE, runDir, generator: hybrid() }); // chair order
+      writeFileSync(join(runDir, "v00", "inbox", "chair.json"),
+        JSON.stringify({ prompt: "make the button bigger", changeIds: ["t-1"] }));
+
+      const out = await stepRun({ designDir, screen: "home", date: DATE, runDir, generator: hybrid(), figma: FIGMA });
+      expect(out.done).toBe(false);
+      const order = readOrder(out);
+      expect(order.kind).toBe("design");
+      expect(order.version).toBe("v01");
+      const [unit] = order.units;
+      expect(unit.inputs.editFrom).toBe("fake-0");
+      expect(unit.inputs.editFromVersion).toBe("v00");
+      expect(unit.inputs.editFromScreenshot).toBe("v00/screen.png");
+      expect(order.instruction).toMatch(/Duplicate frame fake-0.*Never edit fake-0 in place/);
+      expect(readFileSync(join(runDir, "v01", "design-prompt.txt"), "utf8")).toContain("make the button bigger");
+      // A suspension, not an abort: nothing is finalised.
+      expect(existsSync(join(runDir, "manifest.json"))).toBe(false);
+    });
+  });
+
   describe("multiple candidates", () => {
     const withCandidates = (designDir: string, candidates: Record<string, number>) => {
       const cfgFile = join(designDir, "config.json");

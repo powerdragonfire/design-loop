@@ -36,6 +36,18 @@ describe("deterministicCritique", () => {
       i.evidence.selector === "#c1" && /home indicator/i.test(i.claim))).toBe(true);
   });
 
+  it("on a scrolling page, checks only fixed controls against the inset", async () => {
+    const page = `<!doctype html><html><body style="margin:0">
+      <div style="height:2000px"><button id="scrolls" style="position:absolute;top:820px;width:200px;height:44px">More</button></div>
+      <nav style="position:fixed;bottom:0;left:0;right:0;height:60px"><button id="pinned" style="width:100px;height:50px">Save</button></nav>
+    </body></html>`;
+    const doc = await measure(page);
+    expect(doc.nodes.find(n => n.selector === "#pinned")!.pinned).toBe(true);
+    expect(doc.nodes.find(n => n.selector === "#scrolls")!.pinned).toBe(false);
+    const inset = deterministicCritique(doc, {}).critique.issues.filter(i => i.id.startsWith("det-inset-")).map(i => i.id);
+    expect(inset).toEqual(["det-inset-#pinned"]);
+  });
+
   it("sets measurementsPass false when any measurement fails", async () => {
     const { measurementsPass } = deterministicCritique(await measure(html), tokens);
     expect(measurementsPass).toBe(false);
@@ -200,5 +212,49 @@ describe("deterministicCritique issue ids", () => {
     const after = await ids(btn("a", 44) + btn("b", 30));
     expect(before).toEqual(["det-tap-#a", "det-tap-#b"]);
     expect(after).toEqual(["det-tap-#b"]);
+  });
+});
+
+describe("deterministicCritique grid consistency", () => {
+  const tile = (i: number, x: number, y: number, h: number, parent: string | undefined = "Grid") =>
+    node({ selector: `Grid>Tile${i}`, parent, bbox: { x, y, w: 169, h }, style: { backgroundColor: "rgb(255, 255, 255)", borderRadius: "12px" } });
+  const grid = node({ selector: "Grid", bbox: { x: 20, y: 200, w: 350, h: 400 } });
+
+  it("flags tiles that share a width but not a height, citing the grid", () => {
+    // The Spontai Settings grid: 166 / 166 / 174 / 218, two columns.
+    const { critique, measurementsPass } = deterministicCritique(
+      doc(grid, tile(0, 20, 200, 166), tile(1, 201, 200, 166), tile(2, 20, 378, 174), tile(3, 201, 378, 218)), {});
+    const issue = critique.issues.find((i) => i.id === "det-grid-Grid");
+    expect(issue).toBeDefined();
+    expect(issue!.severity).toBe("major");
+    expect(issue!.evidence).toEqual({ selector: "Grid", observed: "4 tiles 169px wide, heights 166, 166, 174, 218px" });
+    expect(measurementsPass).toBe(false);
+  });
+
+  it("is quiet when every tile is the same height", () => {
+    const { critique } = deterministicCritique(
+      doc(grid, tile(0, 20, 200, 166), tile(1, 201, 200, 166), tile(2, 20, 378, 166), tile(3, 201, 378, 167)), {});
+    expect(critique.issues.some((i) => i.id.startsWith("det-grid-"))).toBe(false);
+  });
+
+  it("does not call a single column of uneven cards a grid", () => {
+    const { critique } = deterministicCritique(
+      doc(grid, tile(0, 20, 200, 100), tile(1, 20, 312, 180), tile(2, 20, 504, 60)), {});
+    expect(critique.issues.some((i) => i.id.startsWith("det-grid-"))).toBe(false);
+  });
+
+  it("ignores transparent, square elements, which the Chromium path reports on every node", () => {
+    const plain = (i: number, x: number, y: number, h: number) =>
+      node({ selector: `Grid>Row${i}`, parent: "Grid", bbox: { x, y, w: 169, h }, style: { backgroundColor: "rgba(0, 0, 0, 0)", borderRadius: "0px" } });
+    const { critique } = deterministicCritique(doc(grid, plain(0, 20, 200, 60), plain(1, 201, 200, 90), plain(2, 20, 300, 120)), {});
+    expect(critique.issues.some((i) => i.id.startsWith("det-grid-"))).toBe(false);
+  });
+
+  it("skips a doc without parent links, as the Chromium path produces today", () => {
+    // Built without `parent` at all: passing undefined to `tile` would take its "Grid" default.
+    const orphan = (i: number, x: number, y: number, h: number) =>
+      node({ selector: `Tile${i}`, bbox: { x, y, w: 169, h }, style: { backgroundColor: "rgb(255, 255, 255)", borderRadius: "12px" } });
+    const { critique } = deterministicCritique(doc(grid, orphan(0, 20, 200, 166), orphan(1, 201, 200, 218), orphan(2, 20, 378, 174)), {});
+    expect(critique.issues.some((i) => i.id.startsWith("det-grid-"))).toBe(false);
   });
 });

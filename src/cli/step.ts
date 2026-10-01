@@ -1,14 +1,16 @@
+import { mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { DesignPending } from "../figma/generator.js";
 import { AgentChairClient } from "../chair/agent.js";
 import { AgentLlmClient, WorkOrderPending } from "../critics/agent.js";
 import { LLM_CRITICS } from "../critics/llm.js";
 import { staleAgents } from "./agents.js";
 import { measure } from "../measure/measure.js";
-import { openExistingRun, openRun, writeAtomic } from "../store/store.js";
+import { openExistingRun, openRun, readSource, sourceFile, writeAtomic } from "../store/store.js";
 import type { Generator } from "../stitch/adapter.js";
 import type { CriticName, MeasuredDoc } from "../types.js";
 import { noProgress, type Progress } from "./progress.js";
-import { resumingGenerator, resumingMeasure, resumingRun, type RoundCursor } from "./resume.js";
+import { listVersions, readOptional, resumingGenerator, resumingMeasure, resumingRun, type RoundCursor } from "./resume.js";
 import { runScreen, type RunResult } from "./run.js";
 
 export interface StepOptions {
@@ -30,11 +32,20 @@ export interface StepOptions {
    * needs the check.
    */
   agentsDir?: string;
+  /** Figma runs only: the file and page a design work order points the operator at. */
+  figma?: { fileKey: string; pageId?: string };
+  /**
+   * Figma runs only: freeze every frame the operator has recorded into its version directory before the loop
+   * runs (see `snapshotDesigns`). Off for Stitch, whose screens are written whole by the round that made them.
+   */
+  snapshotDesigns?: boolean;
 }
 
 export type StepResult =
   | { done: true; result: RunResult; runDir: string }
-  | { done: false; workOrder: string; runDir: string };
+  // `kind` is optional so a caller that only needs the order's path — and the tests that mock this — need not
+  // say which kind it is. A dispatcher that has to tell a design order from a critic order reads it.
+  | { done: false; workOrder: string; runDir: string; kind?: "critics" | "chair" | "design" };
 
 /**
  * One subagent's job: which agent type to dispatch, what it may read, and the one file it must write. Paths
@@ -56,7 +67,7 @@ interface WorkUnit {
 
 const rel = (version: string, file: string): string => `${version}/${file}`;
 
-function unitsFor(pending: WorkOrderPending, screen: string): WorkUnit[] {
+function unitsFor(pending: WorkOrderPending, screen: string, source: string): WorkUnit[] {
   const { version } = pending;
   if (pending.kind === "chair") {
     // No fallback to this round's screen.png: after a regression that is the wrong image, which is the bug
@@ -85,7 +96,8 @@ function unitsFor(pending: WorkOrderPending, screen: string): WorkUnit[] {
     inputs: {
       digest: rel(version, "digest.txt"),
       screenshot: rel(version, "screen.png"),
-      html: rel(version, "screen.html"),
+      // `nodeTree` for a Figma frame, so nobody opens JSON expecting markup; `html` for a Stitch page.
+      ...(source === "screen.json" ? { nodeTree: rel(version, source) } : { html: rel(version, source) }),
       screenSpec: `screens/${screen}.md`,
       brief: "brief.md",
       tokens: "tokens.json",
@@ -105,6 +117,7 @@ export async function writeWorkOrder(opts: {
 }): Promise<string> {
   const { runDir, designDir, screen, pending } = opts;
   const file = join(runDir, pending.version, "work-order.json");
+  const source = (await readSource(join(runDir, pending.version)))?.file ?? "screen.html";
   await writeAtomic(file, `${JSON.stringify({
     kind: pending.kind,
     version: pending.version,
@@ -112,9 +125,131 @@ export async function writeWorkOrder(opts: {
     designDir: resolve(designDir),
     runDir: resolve(runDir),
     concurrency: 4,
-    units: unitsFor(pending, screen),
+    units: unitsFor(pending, screen, source),
   }, null, 2)}\n`);
   return file;
+}
+
+/**
+ * The work order for a frame that has to be built or edited in Figma. Unlike a critic or chair order it names
+ * no subagent: `design-loop-*` agents get Read/Grep/Glob/Write and no Figma access, so the only one who can do
+ * this unit is the session driving the loop, which has the Figma MCP.
+ *
+ * The version directory is created here because nothing else has claimed it yet — the generator suspended
+ * before the round could write anything — and both halves need it: `writeAtomic` does not create directories,
+ * and `openExistingRun` refuses a run that holds no `vNN/` at all, so without it the next `step` could not
+ * reopen a run suspended on its very first design. A directory with no `composite.json` is exactly the suspend
+ * state `resumingRun.openVersion` adopts.
+ */
+export async function writeDesignOrder(opts: {
+  runDir: string; designDir: string; screen: string; pending: DesignPending;
+  figma?: { fileKey: string; pageId?: string };
+}): Promise<string> {
+  const { runDir, designDir, screen, pending } = opts;
+  const { version, parentVersion } = pending;
+  if (version === undefined) {
+    throw new Error("BUG: a design work order reached step without a version; the resume layer stamps it");
+  }
+  await mkdir(join(runDir, version), { recursive: true });
+  await writeAtomic(join(runDir, version, "design-prompt.txt"), `${pending.prompt}\n`);
+
+  const output = rel(version, "screen-id.txt");
+  const editing = pending.parentNodeId !== null;
+  const instruction = editing
+    ? `Duplicate frame ${pending.parentNodeId} and apply designPrompt to the COPY. Never edit ${pending.parentNodeId} ` +
+      "in place: after a regression the loop builds from that frame again, and an in-place edit destroys it. " +
+      `Then write the copy's node id to ${output}.`
+    : `Build a new frame${opts.figma?.pageId ? ` on page ${opts.figma.pageId}` : ""} from designPrompt, following ` +
+      `screenSpec, brief and tokens. Then write its node id to ${output}.`;
+
+  const file = join(runDir, version, "work-order.json");
+  await writeAtomic(file, `${JSON.stringify({
+    kind: "design",
+    version,
+    screen,
+    designDir: resolve(designDir),
+    runDir: resolve(runDir),
+    concurrency: 1,
+    figma: opts.figma ?? null,
+    instruction,
+    // One plain frame id per file, e.g. 2047:3389 (a Figma link's 2047-3389 is accepted too). The next `step`
+    // reads that frame from Figma; until the file exists it simply writes this order again.
+    idFormat: "123:456",
+    units: [{
+      critic: "design",
+      // Not a subagent: none of them can reach Figma. The orchestrating session does this unit itself.
+      agent: null,
+      output,
+      inputs: {
+        designPrompt: rel(version, "design-prompt.txt"),
+        screenSpec: `screens/${screen}.md`,
+        brief: "brief.md",
+        tokens: "tokens.json",
+        editFrom: pending.parentNodeId,
+        editFromVersion: parentVersion ?? null,
+        editFromScreenshot: parentVersion ? rel(parentVersion, "screen.png") : null,
+      },
+    }],
+  }, null, 2)}\n`);
+  return file;
+}
+
+/** Figma ids compared as the operator might write them: a link's `123-456` is the same frame as `123:456`. */
+const sameFrame = (a: string, b: string): boolean => a.trim().replace("-", ":") === b.trim().replace("-", ":");
+
+const exists = (file: string): Promise<boolean> =>
+  stat(file).then(() => true, (err: NodeJS.ErrnoException) => (err.code === "ENOENT" ? false : Promise.reject(err)));
+
+/**
+ * Reads each frame the operator has recorded — a `vNN/screen-id.txt` with no `screen.html` beside it — and
+ * writes its PNG and node tree into that version directory, before the loop runs.
+ *
+ * Doing it here, outside `runScreen`, is what keeps a bad answer repairable. Inside the loop, a mistyped id, a
+ * Figma 429 or a frame not yet readable would be caught by the edit loop and recorded as an aborted run, which
+ * finalises it for good. Out here it is a plain failure: nothing is written, and the operator fixes the id and
+ * steps again. It also freezes the frame as it was when the round was scored, so a later tweak in Figma cannot
+ * change what an earlier version is judged on.
+ *
+ * It refuses an id equal to the order's `editFrom`: that is the frame this round was meant to be built FROM,
+ * so recording it means the operator edited it in place — and after a regression the loop builds from it
+ * again. The work order says to duplicate; this makes the rule mechanical rather than a hope.
+ *
+ * The PNG is written before the HTML, and the HTML marks the version as snapshotted, so a crash between the two
+ * leaves the version to be fetched again rather than half-served from disk.
+ */
+export async function snapshotDesigns(runDir: string, generator: Generator): Promise<string[]> {
+  if (!generator.fromId) throw new Error("snapshotDesigns needs a generator that can rebuild a frame from its id");
+  const taken: string[] = [];
+  for (const version of await listVersions(runDir)) {
+    const dir = join(runDir, version);
+    const id = (await readOptional(join(dir, "screen-id.txt")))?.trim();
+    if (!id) continue;
+    if ((await readSource(dir)) !== null) continue;
+
+    const raw = await readOptional(join(dir, "work-order.json"));
+    const order = raw === null ? null : (JSON.parse(raw) as {
+      kind?: string; units?: { inputs?: { editFrom?: string | null; editFromVersion?: string | null } }[];
+    });
+    const inputs = order?.kind === "design" ? order.units?.[0]?.inputs : undefined;
+    if (inputs?.editFrom && sameFrame(inputs.editFrom, id)) {
+      throw new Error(
+        `${version}/screen-id.txt records ${id}, the frame this round was to be built FROM` +
+          `${inputs.editFromVersion ? ` (${inputs.editFromVersion})` : ""}. Duplicate that frame, apply the edit to ` +
+          "the copy, and record the copy's id instead: editing it in place destroys the frame a later round may " +
+          "build from again.",
+      );
+    }
+
+    const handle = generator.fromId(id);
+    // The node first: a wrong id then fails as "Figma has no node …", which names the mistake, rather than as a
+    // missing image URL, which does not.
+    const html = await handle.getHtml();
+    const png = await handle.getImage();
+    await writeAtomic(join(dir, "screen.png"), png);
+    await writeAtomic(join(dir, sourceFile(html)), html);
+    taken.push(version);
+  }
+  return taken;
 }
 
 /**
@@ -135,6 +270,11 @@ export async function stepRun(opts: StepOptions): Promise<StepResult> {
   // freshly claimed run is equivalent there — every round it writes registers itself through `finish`.
   const run = opts.runDir ? await openExistingRun(opts.runDir) : await openRun(designDir, screen, date);
   const runDir = run.dir;
+
+  // Outside the try below on purpose: a failure here must be a plain failure, never a suspension or an abort.
+  if (opts.snapshotDesigns) {
+    for (const version of await snapshotDesigns(runDir, generator)) log?.(`Read ${version}'s frame from Figma`);
+  }
 
   // One cursor, written only by the resuming generator, read by both agent clients to find the round's
   // directory. -1 until the first generate-or-edit, so a read before then names no version at all.
@@ -168,7 +308,16 @@ export async function stepRun(opts: StepOptions): Promise<StepResult> {
           );
         }
       }
-      return { done: false, workOrder: await writeWorkOrder({ runDir, designDir, screen, pending: err }), runDir };
+      return { done: false, kind: err.kind, workOrder: await writeWorkOrder({ runDir, designDir, screen, pending: err }), runDir };
+    }
+    // No staleness check: a design order names no agent file, so there is nothing that could be out of date.
+    if (err instanceof DesignPending) {
+      return {
+        done: false,
+        kind: "design",
+        workOrder: await writeDesignOrder({ runDir, designDir, screen, pending: err, figma: opts.figma }),
+        runDir,
+      };
     }
     // Deliberately no `llm.throwIfPending()` here. `runScreen` already calls it the moment the committee
     // settles, so anything else reaching this point is a real failure, and raising a work order over it would

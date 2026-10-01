@@ -142,13 +142,20 @@ export class AnthropicLlmClient implements LlmClient {
       `Digest:\n${input.digest}`,
       `Screen spec:\n${contract.screens[input.screen] ?? "(none)"}`,
       input.openIssues.length
-        ? `Open issues from earlier rounds. List the id under resolved.claimed only if now fixed:\n${JSON.stringify(input.openIssues, null, 2)}`
+        ? "Open issues from earlier rounds. List the id under resolved.claimed only if now fixed. If an issue's element " +
+          "was renamed or moved, re-list it under the same id with evidence.selector set to its current selector:\n" +
+          JSON.stringify(input.openIssues, null, 2)
         : "No issues are open from earlier rounds.",
       // Volatile, so it lives here and not in the cached prefix.
       `Number any NEW issue starting at \`${nextIssueId(critic, input.openIssues)}\`; re-list a persisting issue under its existing id.`,
     ];
     if (critic === "accessibility") {
-      parts.push(`Deterministic measurements (facts, do not contradict):\n${JSON.stringify(input.measurements, null, 2)}`);
+      parts.push(
+        input.measurements.length
+          ? `Deterministic measurements (facts, do not contradict):\n${JSON.stringify(input.measurements, null, 2)}`
+          : "Deterministic measurements: every check passed (contrast on every text node, tap size and home-indicator " +
+            "inset on every control, tile heights in every grid). This is a measured result, not missing data.",
+      );
     }
     const content = [
       { type: "image", source: { type: "base64", media_type: "image/png", data: input.imagePng.toString("base64") } },

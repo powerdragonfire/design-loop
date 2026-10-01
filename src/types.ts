@@ -29,6 +29,23 @@ export interface MeasuredNode {
   style: Record<string, string>;
   /** Ancestor elements between this node and <body>; direct children of body are 0. */
   depth?: number;
+  /**
+   * The selector of the nearest measured ancestor, so a check can compare siblings (tiles in one grid).
+   * Only the Figma serialiser sets it today; checks that need it skip a doc without it.
+   */
+  parent?: string;
+  /**
+   * The accessible name a screen reader would announce, when it is not the node's own text: an icon-only
+   * control's name, an image's alt text. Absent when the node has none.
+   */
+  label?: string;
+  /** A control currently in its selected / on / checked state, read from its variant. */
+  selected?: boolean;
+  /**
+   * The node stays put while the page scrolls (it or an ancestor is fixed or sticky). Both measuring paths set it
+   * on every node; a doc stored before it existed has it nowhere, and the inset check then behaves as it used to.
+   */
+  pinned?: boolean;
 }
 
 export interface MeasuredDoc {
@@ -60,6 +77,13 @@ export interface Config {
   };
   /** Where critiques come from: the Anthropic API, or files written by Claude Code subagents. */
   criticMode: "api" | "agent";
+  /**
+   * Where screens come from. Optional on the type so a hand-built Config (tests, older callers) still reads as
+   * Stitch; `loadContract` always fills it in.
+   */
+  generator?: "stitch" | "figma";
+  /** The Figma file a Figma run reads frames from, and the page new frames go on. The token is FIGMA_TOKEN. */
+  figma?: { fileKey: string; pageId?: string };
 }
 
 export interface Contract {

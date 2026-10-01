@@ -4,12 +4,13 @@ import { measure } from "../measure/measure.js";
 import { deterministicCritique } from "../critics/deterministic.js";
 import { validateEvidence, promoteResolutions } from "../evidence/validate.js";
 import { composite, gate, openIssues, renormalise } from "../scoring/score.js";
-import { decide, type RoundRecord, type StopReason } from "../scoring/stop.js";
+import { compareRounds, decide, regressed as fellBack, type RoundRecord, type StopReason } from "../scoring/stop.js";
 import { distill } from "../distill/distill.js";
 import { runCommittee, type LlmClient } from "../critics/llm.js";
 import { WorkOrderPending } from "../critics/agent.js";
+import { DesignPending } from "../figma/generator.js";
 import { chair, type ChairClient } from "../chair/chair.js";
-import { selectCandidate, type CandidateRow } from "./candidates.js";
+import { readDirections, selectCandidate, type CandidateRow } from "./candidates.js";
 import type { Generator, Screen } from "../stitch/adapter.js";
 import { MONTHLY_LIMIT, readQuota } from "../stitch/quota.js";
 import { openRun, versionName, writeChair, type CandidateSummary, type Degradation, type Run } from "../store/store.js";
@@ -70,6 +71,12 @@ const addUsage = (total: Usage, more: Usage | undefined): void => {
 
 const isDeterministic = (i: Issue): boolean => i.id.startsWith("det-");
 
+/** What the stop rule ranks a round by besides its composite: the blockers and majors it left open. */
+const issueCounts = (open: Issue[]): { blockers: number; majors: number } => ({
+  blockers: open.filter((i) => i.severity === "blocker").length,
+  majors: open.filter((i) => i.severity === "major").length,
+});
+
 /** `CandidateRow` names the field `open`; the store's `openIssues`/`VersionInput` shape names it `openIssues`. */
 const toSummary = (r: CandidateRow): CandidateSummary => ({
   id: r.id, family: r.family, composite: r.composite, blockers: r.blockers, gatePass: r.gatePass, failed: r.failed,
@@ -93,16 +100,21 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     costUsd(cfg.models.critic, zero);
     costUsd(cfg.models.chair, zero);
   }
-  const quota = await readQuota(opts.quotaDir ?? designDir);
-  const needed = totalCandidates + cfg.maxRounds;
-  if (quota.remaining < needed) {
-    const [y, m] = quota.month.split("-").map(Number);
-    const resets = new Date(Date.UTC(y!, m!, 1)).toISOString().slice(0, 10);
-    throw new Error(
-      `Stitch quota too low: ${quota.remaining} generations left, a run may need ${needed} generations — resets ${resets}`,
-    );
+  // A Figma frame costs no generation quota — it is built by the operator, not generated — so the budget check
+  // and its wording are Stitch's alone. Everything below is unchanged for a Stitch run.
+  const figma = cfg.generator === "figma";
+  const quota = figma ? null : await readQuota(opts.quotaDir ?? designDir);
+  if (quota) {
+    const needed = totalCandidates + cfg.maxRounds;
+    if (quota.remaining < needed) {
+      const [y, m] = quota.month.split("-").map(Number);
+      const resets = new Date(Date.UTC(y!, m!, 1)).toISOString().slice(0, 10);
+      throw new Error(
+        `Stitch quota too low: ${quota.remaining} generations left, a run may need ${needed} generations — resets ${resets}`,
+      );
+    }
+    if (quota.warn) log?.(`Stitch quota: ${quota.used}/${MONTHLY_LIMIT} used this month`);
   }
-  if (quota.warn) log?.(`Stitch quota: ${quota.used}/${MONTHLY_LIMIT} used this month`);
   // loadContract has already refused a null sigma.
   const sigma = cfg.sigma!;
   // A stale calibration is the quiet failure: sigma decides when the run stops, so a run judged against
@@ -112,7 +124,9 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
   progress.header([
     `run ${screen} · design ${designDir}`,
     `critic ${cfg.models.critic} (${cfg.criticMode}) · chair ${cfg.models.chair} · sigma ${sigma} · up to ${cfg.maxRounds} edits`,
-    `Stitch ${quota.used}/${MONTHLY_LIMIT} used this month · results in ${run.dir}`,
+    quota
+      ? `Stitch ${quota.used}/${MONTHLY_LIMIT} used this month · results in ${run.dir}`
+      : `Figma file ${cfg.figma?.fileKey ?? "(unset)"} · results in ${run.dir}`,
   ]);
   progress.attachLog(join(run.dir, "events.jsonl"));
 
@@ -203,7 +217,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     prevDoc = winner.doc;
     carried = winner.open;
     prevOpen = winner.open;
-    rounds.push({ version: "v00", composite: winner.composite, gatePass: winner.gatePass });
+    rounds.push({ version: "v00", composite: winner.composite, gatePass: winner.gatePass, ...issueCounts(winner.open) });
     records.set("v00", {
       png: winner.png, doc: winner.doc, critiques: winner.critiques, open: winner.open,
       composite: winner.composite, prompt: winner.prompt, handle: winner.handle,
@@ -233,12 +247,15 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
    */
   const agentRoundZero = async (): Promise<Seed> => {
     const version = versionName(0);
-    const prompt = buildFirstPrompt(contract, screen);
+    // The first family's direction, exactly as the candidate stage gives its one seed.
+    const direction = (await readDirections(designDir, screen))[0];
+    const base = buildFirstPrompt(contract, screen);
+    const prompt = direction ? `${base}\n\nArt direction: ${direction}` : base;
     progress.banner(`${version} · first generation`, {
       fraction: 0,
       status: `${spendStatus()} · ${stitchGenerations} Stitch generations`,
     });
-    const handle: Screen = await progress.phase("stitch generate", () => generator.generate(prompt));
+    const handle: Screen = await progress.phase(figma ? "figma frame" : "stitch generate", () => generator.generate(prompt));
     stitchGenerations++;
     const [html, png] = await progress.phase(
       "fetch html + image",
@@ -307,7 +324,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     prevDoc = doc;
     carried = open;
     prevOpen = open;
-    rounds.push({ version: slot.version, composite: score, gatePass: verdict.pass });
+    rounds.push({ version: slot.version, composite: score, gatePass: verdict.pass, ...issueCounts(open) });
     records.set(slot.version, { png, doc, critiques: scored, open, composite: score, prompt, handle });
     return { winner: "c0", summaries, handle };
   };
@@ -334,9 +351,14 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
 
       const last = records.get(written)!;
       const best = records.get(decision.best)!;
-      // A regression is judged against the noise floor, as convergence is. The chair then works on the BEST
-      // version, so it is given that version's screenshot and open issues, and the prompt that broke it.
-      const regressed = last.composite < best.composite - cfg.convergenceSigmas * sigma;
+      // A regression is more blockers or majors left open than the best version, or the same issues with a
+      // composite below it by more than the noise floor. The chair then works on the BEST version, so it is
+      // given that version's screenshot and open issues, and the prompt that broke it.
+      const regressed = fellBack(
+        rounds.find((r) => r.version === written)!,
+        rounds.find((r) => r.version === decision.best)!,
+        cfg.convergenceSigmas * sigma,
+      );
       // Only what the CHAIR sees is grouped: one off-token value on twenty elements is one edit, not twenty
       // rounds of the three-change cap. The store, the gate and the critics keep the per-selector issues.
       const chairInput = regressed
@@ -345,6 +367,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
             openIssues: groupTokenIssues(best.open),
             imagePng: best.png,
             tokens: contract.tokens,
+            generator: cfg.generator ?? "stitch",
             regression: {
               bestVersion: decision.best,
               delta: last.composite - best.composite,
@@ -352,10 +375,13 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
               failedPrompt: last.prompt,
             },
           }
-        : { critiques: last.critiques, openIssues: groupTokenIssues(last.open), imagePng: last.png, tokens: contract.tokens, regression: null };
+        : {
+            critiques: last.critiques, openIssues: groupTokenIssues(last.open), imagePng: last.png, tokens: contract.tokens,
+            regression: null, generator: cfg.generator ?? "stitch",
+          };
 
       const chairPhase = (): Promise<Awaited<ReturnType<typeof askChair>>> =>
-        progress.phase("chair", () => askChair(chairInput), (c) => `${c.changes.length} change${c.changes.length === 1 ? "" : "s"} asked of Stitch`);
+        progress.phase("chair", () => askChair(chairInput), (c) => `${c.changes.length} change${c.changes.length === 1 ? "" : "s"} asked of ${figma ? "Figma" : "Stitch"}`);
       let next;
       try {
         next = await chairPhase();
@@ -398,7 +424,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
         fraction: n / cfg.maxRounds,
         status: `${spendStatus()} · ${stitchGenerations} Stitch generation${stitchGenerations === 1 ? "" : "s"}`,
       });
-      const handle: Screen = await progress.phase("stitch edit", () => baseHandle.edit(prompt));
+      const handle: Screen = await progress.phase(figma ? "figma edit" : "stitch edit", () => baseHandle.edit(prompt));
       stitchGenerations++;
       const [html, png] = await progress.phase(
         "fetch html + image",
@@ -462,7 +488,7 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
       // validated copy it would find nothing to drop and report 0. See `ScoredInput.rawCritiques`.
       await slot.finish({ critiques: scored, rawCritiques: committee.critiques, composite: score, gatePass: verdict.pass, openIssues: open, changes });
       const written = slot.version;
-      rounds.push({ version: written, composite: score, gatePass: verdict.pass });
+      rounds.push({ version: written, composite: score, gatePass: verdict.pass, ...issueCounts(open) });
       records.set(written, { png, doc, critiques: scored, open, composite: score, prompt, handle });
       log?.(`${written}: composite ${score.toFixed(1)}, ${open.length} open, gate ${verdict.pass ? "pass" : "fail"}`);
 
@@ -481,18 +507,18 @@ export async function runScreen(opts: RunOptions): Promise<RunResult> {
     // a manifest here would finalise it, and a finalised run refuses every later write — the resumed step
     // could never score the round it is waiting for. This must come before the `rounds.length` test: from
     // round 1 on there ARE rounds, so a suspension would otherwise be recorded as an aborted run.
-    if (err instanceof WorkOrderPending) throw err;
+    // A Figma edit waiting on the operator is the same kind of suspension: round 0's design work escapes only
+    // because `agentRoundZero` runs outside this try, and every later round's edit lands here.
+    if (err instanceof WorkOrderPending || err instanceof DesignPending) throw err;
     // With no version written there is nothing to keep, so the failure is the caller's to see.
     if (rounds.length === 0) throw err;
     stopReason = "aborted";
     abortReason = err instanceof Error ? err.message : String(err);
   }
 
-  // A gate-passing version outranks any other, then highest composite first; the sort is stable, so a tie keeps
-  // the earlier version.
-  const committeeRank = [...rounds]
-    .sort((a, b) => Number(b.gatePass) - Number(a.gatePass) || b.composite - a.composite)
-    .map((r) => r.version);
+  // The stop rule's own order: gate pass, then fewest open blockers, then majors, then composite. The sort is
+  // stable, so a tie keeps the earlier version.
+  const committeeRank = [...rounds].sort(compareRounds).map((r) => r.version);
   const total = noUsage();
   addUsage(total, criticUsage);
   addUsage(total, chairUsage);

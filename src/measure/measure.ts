@@ -94,6 +94,15 @@ export async function measure(html: string): Promise<MeasuredDoc> {
         }
         return "rgb(255, 255, 255)"; // the browser paints a white canvas by default
       }
+      // Fixed or sticky, itself or through an ancestor: the element stays on screen while the page scrolls,
+      // so it is the one thing the home-indicator inset can actually cover.
+      function pinnedOf(el: Element): boolean {
+        for (let cur: Element | null = el; cur && cur !== document.body; cur = cur.parentElement) {
+          const position = getComputedStyle(cur).position;
+          if (position === "fixed" || position === "sticky") return true;
+        }
+        return false;
+      }
       function depthOf(el: Element): number {
         let d = 0;
         for (let cur = el.parentElement; cur && cur !== document.body; cur = cur.parentElement) d++;
@@ -130,6 +139,7 @@ export async function measure(html: string): Promise<MeasuredDoc> {
           bbox: { x: r.x, y: r.y, w: r.width, h: r.height },
           style,
           depth: depthOf(el),
+          pinned: pinnedOf(el),
         });
       }
       return out;

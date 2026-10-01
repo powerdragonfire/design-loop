@@ -34,8 +34,11 @@ export function validateEvidence(
 // still catches an enlarged touch target; style (incl. effectiveBackground) catches
 // colour fixes; the node's OWN text catches a copy fix, which changes neither
 // (spec §7: the element's digest changed, and the digest line carries its text).
+// Role, accessible name and selected state count too: an icon-only control given a name, or a text given a
+// heading style, is a fix to that element even though nothing about it looks different.
 const fingerprint = (n: MeasuredNode): string =>
-  JSON.stringify(n.style) + JSON.stringify([n.bbox.w, n.bbox.h]) + JSON.stringify(n.text);
+  JSON.stringify(n.style) + JSON.stringify([n.bbox.w, n.bbox.h]) + JSON.stringify(n.text) +
+  JSON.stringify([n.role, n.label ?? null, n.selected ?? false]);
 
 function bySelector(doc: MeasuredDoc): Map<string, MeasuredNode> {
   return new Map(doc.nodes.map((n) => [n.selector, n]));

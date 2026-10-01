@@ -203,6 +203,27 @@ interface VersionSummary {
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
+/**
+ * The file a screen's source is kept in. A Stitch screen is HTML; a Figma frame is its node tree as JSON, and
+ * naming that `screen.html` told every critic who opened it to expect markup. Chosen by content, so the store
+ * need not know which generator made it.
+ */
+export const sourceFile = (source: string): "screen.html" | "screen.json" =>
+  source.trimStart().startsWith("{") ? "screen.json" : "screen.html";
+
+/** Both names a screen's source may have: runs written before `screen.json` existed kept Figma JSON as `.html`. */
+export const SOURCE_FILES = ["screen.html", "screen.json"] as const;
+
+/** The stored source in `dir`, whichever name it has, or null when there is none. */
+export async function readSource(dir: string): Promise<{ file: string; content: string } | null> {
+  for (const name of SOURCE_FILES) {
+    const content = await readFile(join(dir, name), "utf8").catch((err: NodeJS.ErrnoException) =>
+      err.code === "ENOENT" ? null : Promise.reject(err));
+    if (content !== null) return { file: name, content };
+  }
+  return null;
+}
+
 /** The on-disk name for a version index, e.g. 3 -> "v03". */
 export function versionName(index: number): string {
   return `v${String(index).padStart(2, "0")}`;
@@ -240,7 +261,7 @@ function assertSegment(what: string, value: string): void {
 }
 
 /** The temp file sits beside its target: rename is only atomic within one filesystem. */
-export async function writeAtomic(file: string, content: string): Promise<void> {
+export async function writeAtomic(file: string, content: string | Uint8Array): Promise<void> {
   const tmp = join(dirname(file), `.${randomUUID()}.tmp`);
   try {
     await writeFile(tmp, content);
@@ -270,7 +291,7 @@ async function writeScreenDir(base: string, p: ScreenPayload): Promise<void> {
   await mkdir(join(base, "critiques"));
   await Promise.all([
     writeFile(join(base, "screen.png"), p.png),
-    writeFile(join(base, "screen.html"), p.html),
+    writeFile(join(base, sourceFile(p.html)), p.html),
     writeFile(join(base, "digest.json"), json(p.doc)),
     writeFile(join(base, "composite.json"), json({ composite: p.composite, gatePass: p.gatePass })),
     writeFile(join(base, "prompt.txt"), p.prompt),
@@ -356,7 +377,7 @@ function makeRun(
         if (g.parent != null && !written(g.parent)) throw new Error(`no such version ${g.parent} as the parent`);
         await Promise.all([
           writeFile(join(base, "screen.png"), g.png),
-          writeFile(join(base, "screen.html"), g.html),
+          writeFile(join(base, sourceFile(g.html)), g.html),
           writeFile(join(base, "digest.json"), json(g.doc)),
           writeFile(join(base, "prompt.txt"), g.prompt),
           ...(g.screenId ? [writeFile(join(base, "screen-id.txt"), g.screenId)] : []),

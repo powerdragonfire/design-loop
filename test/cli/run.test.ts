@@ -6,6 +6,7 @@ import { mkdirSync } from "node:fs";
 import { runScreen, type RunOptions } from "../../src/cli/run.js";
 import { recordProgress } from "../helpers/recordProgress.js";
 import { FakeGenerator, type Generator } from "../../src/stitch/adapter.js";
+import { DesignPending } from "../../src/figma/generator.js";
 import { reserve, MONTHLY_LIMIT } from "../../src/stitch/quota.js";
 import type { CriticInput, LlmClient } from "../../src/critics/llm.js";
 import type { ChairClient, ChairInput } from "../../src/chair/chair.js";
@@ -255,6 +256,48 @@ describe("runScreen", () => {
     expect(m.stopReason).toBe("aborted");
     expect(m.abortReason).toMatch(/script exhausted/);
     expect(existsSync(join(runDir(dir), "v00", "screen.png"))).toBe(true);
+  });
+
+  it("treats a Figma design suspension in an edit round as a suspension, not an abort", async () => {
+    // v00 scores 70, so the loop asks for an edit — and a Figma edit can only be handed back, never done.
+    // Before the fix this was recorded as stopReason "aborted" with a manifest, which finalised the run so
+    // that no later `step` could ever resume it.
+    const dir = setup();
+    const inner = new FakeGenerator([shot(30)]);
+    const generator: Generator = {
+      generate: async (prompt) => {
+        const s = await inner.generate(prompt);
+        return {
+          id: s.id,
+          edit: async (p) => { throw new DesignPending(p, s.id); },
+          getHtml: () => s.getHtml(),
+          getImage: () => s.getImage(),
+        };
+      },
+      variants: (seed, prompt, o) => inner.variants(seed, prompt, o),
+    };
+    await expect(
+      runScreen({ designDir: dir, screen: "home", date: DATE, generator, llm: llmOf([70]).llm, chairClient: chairOf().client }),
+    ).rejects.toBeInstanceOf(DesignPending);
+    expect(existsSync(join(runDir(dir), "manifest.json"))).toBe(false);
+    expect(existsSync(join(runDir(dir), "v00", "screen.png"))).toBe(true);
+  });
+
+  it("does not hold a Figma run to the Stitch quota, and names the Figma file instead", async () => {
+    // Frames are built by the operator, not generated, so an exhausted Stitch month must not block the run.
+    const { progress, events } = recordProgress();
+    const o = opts(
+      { criticMode: "agent", generator: "figma", figma: { fileKey: "FILEKEY" } },
+      {
+        quotaRemaining: 0,
+        progress,
+        generator: { generate: async (p) => { throw new DesignPending(p, null); }, variants: async () => [] },
+      },
+    );
+    await expect(runScreen(o)).rejects.toBeInstanceOf(DesignPending);
+    expect(events).toContain(`header Figma file FILEKEY · results in ${runDir(o.designDir)}`);
+    expect(events.join("\n")).not.toMatch(/Stitch/);
+    expect(events.some((e) => e.startsWith("begin figma frame"))).toBe(true);
   });
 
   it("aborts before generating when the quota cannot cover a whole run", async () => {

@@ -165,6 +165,52 @@ describe("main", () => {
     expect(c.out.join("\n")).toContain("/r/v00/work-order.json");
   });
 
+  describe("a Figma design folder", () => {
+    const FIGMA = { fileKey: "Hd1q4ePvrHOmZerZZNmk9b", pageId: "266:2" };
+    const figmaDesign = () => {
+      const dir = designIn("agent");
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify({ ...JSON.parse(readFileSync(cfg, "utf8")), generator: "figma", figma: FIGMA }));
+      return dir;
+    };
+    const designOrder = () => vi.fn(async () =>
+      ({ done: false as const, kind: "design" as const, workOrder: "/r/v00/work-order.json", runDir: "/r" }));
+
+    it("steps with the Figma generator, a native measure and the snapshot on", async () => {
+      const c = capture();
+      const measure = vi.fn();
+      const d = deps({ makeMeasure: vi.fn(() => measure), stepRun: designOrder() });
+      expect(await main(["--design", figmaDesign(), "run", "--date", "2026-09-29", "home"], c.io, d)).toBe(10);
+      expect(d.makeGenerator).toHaveBeenCalledWith(expect.objectContaining({ generator: "figma", figma: FIGMA }));
+      expect(d.stepRun).toHaveBeenCalledWith(expect.objectContaining({ measure, snapshotDesigns: true, figma: FIGMA }));
+      // Agent mode, so no Anthropic preflight, and no Stitch run either.
+      expect(d.preflight).not.toHaveBeenCalled();
+      expect(d.runScreen).not.toHaveBeenCalled();
+    });
+
+    it("tells the operator to build the frame themselves, not to dispatch agents", async () => {
+      const c = capture();
+      expect(await main(["--design", figmaDesign(), "run", "home"], c.io, deps({ stepRun: designOrder() }))).toBe(10);
+      const text = c.out.join("\n");
+      expect(text).toContain("Build the frame in Figma");
+      expect(text).toContain("never edit in place");
+      expect(text).toContain("design-loop step /r");
+      expect(text).not.toContain("Dispatch the agents");
+    });
+
+    it("leaves a Stitch step exactly as it was, with no Figma option at all", async () => {
+      const c = capture();
+      const d = deps({
+        stepRun: vi.fn(async () => ({ done: false as const, workOrder: "/r/v00/work-order.json", runDir: "/r" })),
+      });
+      await main(["--design", designIn("agent"), "run", "home"], c.io, d);
+      const arg = (d.stepRun as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+      expect(arg).not.toHaveProperty("snapshotDesigns");
+      expect(arg).not.toHaveProperty("figma");
+      expect(arg).not.toHaveProperty("measure");
+    });
+  });
+
   // The mode selector tolerates only a missing config.json. A real contract error must not fail open into
   // API mode, where the credential check would report a broken tokens.json as a rejected Anthropic key —
   // a key an agent-mode run has no reason to hold.

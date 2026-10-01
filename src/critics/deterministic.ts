@@ -168,9 +168,65 @@ function tapIssues(nodes: MeasuredNode[]): Issue[] {
   });
 }
 
+/**
+ * Tiles laid out as a grid — three or more card-like siblings sharing one width, across two or more
+ * columns — whose heights differ. Ragged rows and misaligned columns are the most visible layout defect
+ * a screen can have and no critic reliably ranks them: they surface as a "minor" remark about uneven
+ * tiles, below every blocker, so the chair never reaches them. Measured here, the heights are a fact.
+ *
+ * A card is anything at least 44pt each way that paints a background or has a radius. Needs `parent` to
+ * group siblings, so a doc without it (the Chromium path today) is simply not checked.
+ */
+function gridIssues(nodes: MeasuredNode[]): Issue[] {
+  const byParent = new Map<string, MeasuredNode[]>();
+  for (const n of nodes) {
+    if (n.parent === undefined) continue;
+    const group = byParent.get(n.parent) ?? [];
+    group.push(n);
+    byParent.set(n.parent, group);
+  }
+  const out: Issue[] = [];
+  for (const [parent, kids] of byParent) {
+    // "Paints" and "rounded" in substance, not merely present: the Chromium path reports every element's
+    // backgroundColor (transparent included) and borderRadius (0px included), so presence alone would make
+    // every node a card.
+    const paints = (v?: string): boolean => { const c = v ? parseColor(v) : null; return c !== null && c.a > 0; };
+    const rounded = (v?: string): boolean => (v ?? "").split(/[\s/]+/).some((p) => p !== "" && dimension(p) !== "0px");
+    const cards = kids.filter((k) => k.bbox.w >= MIN_TAP && k.bbox.h >= MIN_TAP && (paints(k.style["backgroundColor"]) || rounded(k.style["borderRadius"])));
+    if (cards.length < 3) continue;
+    // The width most cards share (within a pixel) is the grid's column width.
+    const counts = new Map<number, number>();
+    for (const c of cards) counts.set(Math.round(c.bbox.w), (counts.get(Math.round(c.bbox.w)) ?? 0) + 1);
+    const width = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]![0];
+    const tiles = cards.filter((c) => Math.abs(c.bbox.w - width) <= 1);
+    const columns = new Set(tiles.map((t) => Math.round(t.bbox.x)));
+    if (tiles.length < 3 || columns.size < 2) continue;
+    const heights = tiles.map((t) => Math.round(t.bbox.h));
+    if (Math.max(...heights) - Math.min(...heights) <= 2) continue;
+    out.push({
+      id: `det-grid-${parent}`,
+      severity: "major" as const,
+      evidence: { selector: parent, observed: `${tiles.length} tiles ${width}px wide, heights ${heights.join(", ")}px` },
+      claim: `Tiles in this grid share a width but not a height (${Math.min(...heights)}–${Math.max(...heights)}px), so rows are ragged and columns do not line up`,
+      fix: "Give every tile in the grid the same height: stretch each row to its tallest tile, or set one tile height for all",
+      effort: "low" as const,
+    });
+  }
+  return out;
+}
+
+/**
+ * On a page that scrolls, only what stays put can sit under the home indicator: everything else scrolls up
+ * past it. So when the doc says which nodes are pinned (both measuring paths now do) and its content runs
+ * past the screen, only pinned controls are checked. A doc stored before `pinned` existed, or a page that
+ * fits the screen, is checked in full, as before.
+ */
 function insetIssues(nodes: MeasuredNode[]): Issue[] {
   const top = VIEWPORT.h - HOME_INDICATOR_INSET;
+  const knowsPinning = nodes.some(n => n.pinned !== undefined);
+  const scrolls = knowsPinning && nodes.some(n => n.bbox.y + n.bbox.h > VIEWPORT.h + 1);
   return nodes.filter(isInteractive).flatMap(n => {
+    if (scrolls && !n.pinned) return [];
     const { y, h } = n.bbox;
     // Interactive elements that start on the first screen and reach into the inset.
     // Below-the-fold elements are not pinned to the bottom; wrappers are not interactive.
@@ -247,6 +303,7 @@ export function deterministicCritique(
     ...tapIssues(doc.nodes),
     ...token.issues,
     ...insetIssues(doc.nodes),
+    ...gridIssues(doc.nodes),
   ];
   const score = token.total === 0 ? 100 : (100 * (token.total - token.issues.length)) / token.total;
   return {

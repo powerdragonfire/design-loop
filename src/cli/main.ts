@@ -12,7 +12,7 @@ import { AnthropicLlmClient, type LlmClient } from "../critics/llm.js";
 import { buildReport, captureApproval } from "../report/report.js";
 import { createStitchGenerator, type Generator } from "../stitch/adapter.js";
 import { createFigmaClient } from "../figma/client.js";
-import { FigmaGenerator, figmaMeasure } from "../figma/generator.js";
+import { FigmaGenerator, figmaMeasure, normaliseNodeId } from "../figma/generator.js";
 import type { Config, MeasuredDoc } from "../types.js";
 import { defaultAgentsDir, staleAgents, syncAgents } from "./agents.js";
 import { abDistiller, calibrate, calibrateAgent } from "./calibrate.js";
@@ -20,7 +20,8 @@ import { inspectVersion } from "./inspect.js";
 import { createProgress, noProgress, promptLines, type Progress, type ProgressMode } from "./progress.js";
 import { runScreen } from "./run.js";
 import { isSkipped, smoke } from "./smoke.js";
-import { stepRun } from "./step.js";
+import { readStart, stepRun, type RunStart } from "./step.js";
+import { check, formatRows } from "./check.js";
 import { runIdentity } from "../store/store.js";
 
 export interface Deps {
@@ -35,8 +36,11 @@ export interface Deps {
   calibrateAgent: typeof calibrateAgent;
   abDistiller: typeof abDistiller;
   smoke: typeof smoke;
-  /** The generator a run uses. Given the design folder's config it picks Stitch or Figma; without one, Stitch. */
-  makeGenerator(config?: Config): Generator;
+  /**
+   * The generator a run uses. Given the design folder's config it picks Stitch or Figma; without one, Stitch.
+   * `seed` is a Figma run's starting frame (`run --seed`), which its first generation duplicates.
+   */
+  makeGenerator(config?: Config, seed?: string): Generator;
   /**
    * The measure a run uses, when it is not the default Chromium render. Figma frames are serialised node trees,
    * not HTML, so a Figma run measures them natively. Optional so a test's Deps need not supply it.
@@ -65,8 +69,12 @@ export interface Io {
 const USAGE = `Usage: design-loop [--design <dir>] <command>
 
 Commands:
+  check [screen]                     list everything a run needs and what is missing (--offline: no Figma call)
   smoke                              check every live service once, before spending real money
   run <screen> [--date YYYY-MM-DD]   generate and critique a screen until a stopping rule fires
+      [--direction N]                start from art direction N (one run per direction to compare them)
+      [--from <nodeId>]              Figma: improve an existing frame; it is scored as v00
+      [--seed <nodeId>]              Figma: build v00 by duplicating this frame (a missing state)
   step <runDir>                      advance an agent-mode run by one round
   sync-agents                        write the agent definitions from the critic rubrics
   review <runDir>                    open the report, then ask which version to approve
@@ -105,10 +113,10 @@ export function defaultDeps(designDir: string, io: Io, progress: Progress = noPr
     calibrateAgent,
     abDistiller,
     smoke,
-    makeGenerator: (config) =>
+    makeGenerator: (config, seed) =>
       config?.generator === "figma"
         // The token comes from FIGMA_TOKEN, never config; createFigmaClient names it if it is missing.
-        ? new FigmaGenerator({ client: createFigmaClient({ fileKey: config.figma?.fileKey }) })
+        ? new FigmaGenerator({ client: createFigmaClient({ fileKey: config.figma?.fileKey }), seed })
         : createStitchGenerator({
             quotaDir: designDir,
             onRetry: (r) => progress.warn(`stitch ${r.what} failed, attempt ${r.attempt} of ${r.of} in ${r.waitMs / 1000}s: ${r.error.split("\n")[0]!.slice(0, 100)}`),
@@ -234,13 +242,20 @@ async function readConfig(designDir: string): Promise<Config | null> {
  */
 async function stepCommand(
   d: Deps, io: Io, progress: Progress, designDir: string, agentsDir: string, runDir?: string, screen?: string, date?: string,
+  start: RunStart = {},
 ): Promise<number> {
   // A resumed run says which screen and date it is for; only the first step is told.
   const identity = runDir === undefined ? { screen: screen!, date: date! } : await d.runIdentity(runDir);
   const config = (await readConfig(designDir)) ?? undefined;
   const figma = config?.generator === "figma";
+  // A resumed run starts the way its first step did, whatever this command line says.
+  const begun = runDir === undefined ? start : await readStart(runDir);
+  if (!figma && (begun.from !== undefined || begun.seed !== undefined)) {
+    throw new UsageError("--from and --seed name Figma frames: they need \"generator\": \"figma\"");
+  }
   const out = await d.stepRun({
-    designDir, ...identity, runDir, generator: d.makeGenerator(config), log: (line) => io.out(line), progress,
+    designDir, ...identity, runDir, generator: begun.seed === undefined ? d.makeGenerator(config) : d.makeGenerator(config, begun.seed), log: (line) => io.out(line), progress,
+    ...(runDir === undefined && Object.keys(start).length > 0 ? { start } : {}),
     // Every real agent-mode run checks its agent files; only `stepRun`'s own unit tests, which construct
     // this option directly, ever leave it unset.
     agentsDir,
@@ -274,15 +289,20 @@ async function stepCommand(
 
 async function runCommand(
   d: Deps, io: Io, progress: Progress, designDir: string, agentsDir: string, screen: string, date: string,
+  start: RunStart = {},
 ): Promise<number> {
   // In agent mode `run` IS the first step: the critics are subagents this process cannot call, so the round
   // suspends as soon as they are needed. The preflight is skipped with it — it authenticates an Anthropic key
   // that an agent-mode run never uses, and failing on a key nobody needs would block the whole mode.
-  if (await isAgentMode(designDir)) return await stepCommand(d, io, progress, designDir, agentsDir, undefined, screen, date);
+  if (await isAgentMode(designDir)) return await stepCommand(d, io, progress, designDir, agentsDir, undefined, screen, date, start);
+  if (start.from !== undefined || start.seed !== undefined) {
+    throw new UsageError("--from and --seed name Figma frames: they need \"generator\": \"figma\"");
+  }
   await progress.phase("check credentials", () => d.preflight());
   const generator = d.makeGenerator();
   const result = await d.runScreen({
     designDir, screen, date, generator, llm: d.makeLlm(), chairClient: d.makeChair(), log: (line) => io.out(line), progress,
+    ...(start.direction !== undefined ? { direction: start.direction } : {}),
   });
   // The summary first: on a PAID run a failing report must not cost the operator the stop reason, the
   // versions, what was spent, or the exit-3 signal a script reads.
@@ -358,6 +378,8 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
           design: { type: "string" }, date: { type: "string" }, repeats: { type: "string" }, help: { type: "boolean" },
           quiet: { type: "boolean" }, verbose: { type: "boolean" },
           selector: { type: "string" }, text: { type: "string" }, "agents-dir": { type: "string" },
+          direction: { type: "string" }, from: { type: "string" }, seed: { type: "string" },
+          json: { type: "boolean" }, offline: { type: "boolean" },
         },
         allowPositionals: true,
         strict: true,
@@ -372,13 +394,18 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
     const need = (n: number, what: string): void => {
       if (args.length !== n) throw new UsageError(`\`${command}\` takes ${what}`);
     };
-    const only = (option: "date" | "repeats" | "selector" | "text", cmd: string): void => {
+    const only = (option: "date" | "repeats" | "selector" | "text" | "direction" | "from" | "seed" | "json" | "offline", cmd: string): void => {
       if (values[option] !== undefined && command !== cmd) throw new UsageError(`--${option} only applies to \`${cmd}\``);
     };
     only("date", "run");
     only("repeats", "calibrate");
     only("selector", "inspect");
     only("text", "inspect");
+    only("direction", "run");
+    only("from", "run");
+    only("seed", "run");
+    only("json", "check");
+    only("offline", "check");
 
     if (values.quiet && values.verbose) throw new UsageError("--quiet and --verbose cannot be used together");
     const designDir = values.design ?? "design";
@@ -393,7 +420,27 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
         need(1, "one argument: <screen>");
         const date = values.date ?? d.now().toISOString().slice(0, 10);
         if (!DATE.test(date)) throw new UsageError(`--date must be YYYY-MM-DD (got ${date})`);
-        return await runCommand(d, io, progress, designDir, agentsDir, args[0]!, date);
+        const start: RunStart = {};
+        if (values.direction !== undefined) {
+          const n = Number(values.direction);
+          if (!Number.isInteger(n) || n < 0) throw new UsageError(`--direction must be a whole number from 0 (got ${values.direction})`);
+          start.direction = n;
+        }
+        if (values.from !== undefined && values.seed !== undefined) throw new UsageError("--from and --seed cannot be used together");
+        try {
+          if (values.from !== undefined) start.from = normaliseNodeId(values.from);
+          if (values.seed !== undefined) start.seed = normaliseNodeId(values.seed);
+        } catch (err) {
+          throw new UsageError((err as Error).message);
+        }
+        return await runCommand(d, io, progress, designDir, agentsDir, args[0]!, date, start);
+      }
+      case "check": {
+        if (args.length > 1) throw new UsageError("`check` takes at most one argument: [screen]");
+        const rows = await check({ designDir, screen: args[0], agentsDir, offline: values.offline });
+        if (values.json) io.out(JSON.stringify(rows, null, 2));
+        else for (const line of formatRows(rows)) io.out(line);
+        return rows.some((r) => r.status === "fail") ? 1 : 0;
       }
       case "step": {
         need(1, "one argument: <runDir>");

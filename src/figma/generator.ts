@@ -58,6 +58,12 @@ export function normaliseNodeId(id: string): string {
 
 export interface FigmaGeneratorOptions {
   client: FigmaClient;
+  /**
+   * A frame the FIRST generation is built from rather than from nothing: v00's design order says "duplicate
+   * this frame and apply the spec to the copy". For a missing state of a screen that already exists (its empty,
+   * error or dark version), where starting blank would throw away everything the base frame already settled.
+   */
+  seed?: string;
 }
 
 /**
@@ -70,13 +76,15 @@ export interface FigmaGeneratorOptions {
  */
 export class FigmaGenerator implements Generator {
   private readonly client: FigmaClient;
+  private readonly seed: string | null;
 
   constructor(opts: FigmaGeneratorOptions) {
     this.client = opts.client;
+    this.seed = opts.seed === undefined ? null : normaliseNodeId(opts.seed);
   }
 
   async generate(prompt: string): Promise<Screen> {
-    throw new DesignPending(prompt, null);
+    throw new DesignPending(prompt, this.seed);
   }
 
   async variants(_seed: Screen, _prompt: string, _opts: VariantOptions): Promise<Screen[]> {

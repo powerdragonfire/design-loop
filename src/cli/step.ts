@@ -1,6 +1,6 @@
 import { mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { DesignPending } from "../figma/generator.js";
+import { DesignPending, normaliseNodeId } from "../figma/generator.js";
 import { AgentChairClient } from "../chair/agent.js";
 import { AgentLlmClient, WorkOrderPending } from "../critics/agent.js";
 import { LLM_CRITICS } from "../critics/llm.js";
@@ -12,6 +12,27 @@ import type { CriticName, MeasuredDoc } from "../types.js";
 import { noProgress, type Progress } from "./progress.js";
 import { listVersions, readOptional, resumingGenerator, resumingMeasure, resumingRun, type RoundCursor } from "./resume.js";
 import { runScreen, type RunResult } from "./run.js";
+
+/**
+ * How a run starts, fixed by its first step and stored in `start.json` so every later step resumes it the same
+ * way: the direction it explores, and whether v00 is an existing frame (`from`) or built from one (`seed`).
+ */
+export interface RunStart {
+  /** Index into the screen's art directions; 0 when unset. */
+  direction?: number;
+  /** Improve an existing frame: it IS v00, scored as it stands. Edits duplicate it, so it is never changed. */
+  from?: string;
+  /** A missing state: v00 is built by duplicating this frame and applying the spec to the copy. */
+  seed?: string;
+}
+
+const START_FILE = "start.json";
+
+/** The start a run was claimed with; empty for a run claimed before `start.json` existed. */
+export async function readStart(runDir: string): Promise<RunStart> {
+  const raw = await readOptional(join(runDir, START_FILE));
+  return raw === null ? {} : (JSON.parse(raw) as RunStart);
+}
 
 export interface StepOptions {
   designDir: string;
@@ -39,6 +60,11 @@ export interface StepOptions {
    * runs (see `snapshotDesigns`). Off for Stitch, whose screens are written whole by the round that made them.
    */
   snapshotDesigns?: boolean;
+  /**
+   * First step only: how the run starts. Written to `start.json`; a resumed step reads it back from there and
+   * ignores this. The generator must already have been built with the same `seed` (see `readStart`).
+   */
+  start?: RunStart;
 }
 
 export type StepResult =
@@ -155,7 +181,10 @@ export async function writeDesignOrder(opts: {
 
   const output = rel(version, "screen-id.txt");
   const editing = pending.parentNodeId !== null;
-  const instruction = editing
+  const instruction = editing && !parentVersion
+    ? `Duplicate frame ${pending.parentNodeId} (the existing screen this one starts from) and apply designPrompt ` +
+      `to the COPY, following screenSpec. Never edit ${pending.parentNodeId} itself. Then write the copy's node id to ${output}.`
+    : editing
     ? `Duplicate frame ${pending.parentNodeId} and apply designPrompt to the COPY. Never edit ${pending.parentNodeId} ` +
       "in place: after a regression the loop builds from that frame again, and an in-place edit destroys it. " +
       `Then write the copy's node id to ${output}.`
@@ -270,6 +299,17 @@ export async function stepRun(opts: StepOptions): Promise<StepResult> {
   // freshly claimed run is equivalent there — every round it writes registers itself through `finish`.
   const run = opts.runDir ? await openExistingRun(opts.runDir) : await openRun(designDir, screen, date);
   const runDir = run.dir;
+  const start = opts.runDir ? await readStart(runDir) : (opts.start ?? {});
+  if (!opts.runDir) {
+    if (start.from !== undefined && start.seed !== undefined) throw new Error("a run starts from an existing frame or a seed, not both");
+    if (Object.keys(start).length > 0) await writeAtomic(join(runDir, START_FILE), `${JSON.stringify(start, null, 2)}\n`);
+    // An existing frame is v00 exactly as an operator-recorded frame would be: `snapshotDesigns` reads it and the
+    // resume layer serves it, so the first step goes straight to the critics with no design order at all.
+    if (start.from !== undefined) {
+      await mkdir(join(runDir, "v00"), { recursive: true });
+      await writeAtomic(join(runDir, "v00", "screen-id.txt"), `${normaliseNodeId(start.from)}\n`);
+    }
+  }
 
   // Outside the try below on purpose: a failure here must be a plain failure, never a suspension or an abort.
   if (opts.snapshotDesigns) {
@@ -290,6 +330,7 @@ export async function stepRun(opts: StepOptions): Promise<StepResult> {
       llm,
       chairClient,
       run: resumingRun(run, runDir),
+      direction: start.direction,
     });
     return { done: true, result, runDir };
   } catch (err) {

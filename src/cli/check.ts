@@ -33,7 +33,7 @@ export interface CheckOptions {
   probeFigma?: (fileKey: string, nodeId?: string) => Promise<{ name: string; type: string }>;
 }
 
-export const SKILLS = ["design-loop", "design-setup", "start-design"] as const;
+export const SKILLS = ["design-loop", "design-setup", "start-design", "notion-design-sync"] as const;
 
 /** Where a design-system document usually sits; `project.json` may name another. */
 const DESIGN_DOCS = ["DESIGN.md", "design.md"];

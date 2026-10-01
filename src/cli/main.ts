@@ -22,6 +22,7 @@ import { runScreen } from "./run.js";
 import { isSkipped, smoke } from "./smoke.js";
 import { readStart, stepRun, type RunStart } from "./step.js";
 import { check, formatRows } from "./check.js";
+import { figmaFrameUrl, formatRuns, listRuns } from "./runs.js";
 import { runIdentity } from "../store/store.js";
 
 export interface Deps {
@@ -70,6 +71,7 @@ const USAGE = `Usage: design-loop [--design <dir>] <command>
 
 Commands:
   check [screen]                     list everything a run needs and what is missing (--offline: no Figma call)
+  runs [--json]                      every run in the design folder: state, scores, approval, Figma frames
   smoke                              check every live service once, before spending real money
   run <screen> [--date YYYY-MM-DD]   generate and critique a screen until a stopping rule fires
       [--direction N]                start from art direction N (one run per direction to compare them)
@@ -394,7 +396,7 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
     const need = (n: number, what: string): void => {
       if (args.length !== n) throw new UsageError(`\`${command}\` takes ${what}`);
     };
-    const only = (option: "date" | "repeats" | "selector" | "text" | "direction" | "from" | "seed" | "json" | "offline", cmd: string): void => {
+    const only = (option: "date" | "repeats" | "selector" | "text" | "direction" | "from" | "seed" | "offline", cmd: string): void => {
       if (values[option] !== undefined && command !== cmd) throw new UsageError(`--${option} only applies to \`${cmd}\``);
     };
     only("date", "run");
@@ -404,7 +406,7 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
     only("direction", "run");
     only("from", "run");
     only("seed", "run");
-    only("json", "check");
+    if (values.json !== undefined && command !== "check" && command !== "runs") throw new UsageError("--json only applies to `check` and `runs`");
     only("offline", "check");
 
     if (values.quiet && values.verbose) throw new UsageError("--quiet and --verbose cannot be used together");
@@ -434,6 +436,21 @@ export async function main(argv: string[], io: Io, overrides: Partial<Deps> = {}
           throw new UsageError((err as Error).message);
         }
         return await runCommand(d, io, progress, designDir, agentsDir, args[0]!, date, start);
+      }
+      case "runs": {
+        need(0, "no arguments");
+        const runs = await listRuns(designDir);
+        if (!values.json) {
+          for (const line of formatRuns(runs)) io.out(line);
+          return 0;
+        }
+        // Frame links need the file key, which only the config knows; a folder without one gets none.
+        const fileKey = (await readConfig(designDir).catch(() => null))?.figma?.fileKey;
+        const linked = fileKey === undefined ? runs : runs.map((r) => ({
+          ...r, versions: r.versions.map((v) => (v.frameId ? { ...v, frameUrl: figmaFrameUrl(fileKey, v.frameId) } : v)),
+        }));
+        io.out(JSON.stringify(linked, null, 2));
+        return 0;
       }
       case "check": {
         if (args.length > 1) throw new UsageError("`check` takes at most one argument: [screen]");

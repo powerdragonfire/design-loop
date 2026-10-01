@@ -50,6 +50,7 @@ design/
 
 | Command | What it does | Cost |
 | --- | --- | --- |
+| `runs [--json]` | Lists every run in the design folder: done (with its stop reason) or waiting (on a design, critics or chair order), the best version's score, gate and open blockers and majors, the approval, the start options and, for Figma, a link to each version's frame. `--json` is what `/notion-design-sync` reads. | free |
 | `check [screen] [--json] [--offline]` | Lists everything a run needs, one row each, and what to run to fix it: the contract (config, tokens, brief), the screen spec, sigma and its calibration, the agent files, the Figma token, file and page (one small read; `--offline` skips it), `project.json`, whether `brief.md` carries a `DESIGN.md`'s rules, and the skills. Exit 1 on any failure. `--json` is for the skills. | free |
 | `smoke` | Calls every live service once — a critic call, the same call again to prove the prompt cache hits, a chair call, a Stitch generate AND edit, then `measure()` on the real Stitch page — and prints PASS/FAIL/SKIP per step. Run it first. | 2 Stitch generations, ~$0.30 |
 | `calibrate [--repeats N]` | Scores each `reference/` screen N times and writes the composite's noise floor into `config.json` as `sigma`, plus `.design-loop/calibration.json` (which records the critic mode it was measured in). Re-run it after changing the critic model, the weights or the critic mode. In `criticMode: "agent"` it works like `step`: it writes one `work-order.json` under `.design-loop/calibrate-agent/` naming every critic for every repeat, exits 10, and once they have answered, run it again (same `--repeats`) to compute sigma. | ~$2.20 at 5 repeats; not metered in agent mode |
@@ -209,7 +210,7 @@ critic claude-sonnet-5 · chair claude-opus-5 · sigma 1.8 · up to 5 edits
 
 ## Claude Code skill
 
-Three skills let Claude drive this tool for you:
+Four skills let Claude drive this tool for you:
 
 - `/design-setup` asks which app you are designing, connects its Figma file and pages, folds a `DESIGN.md` into
   `brief.md`, writes `project.json`, and stops when `check` is green.
@@ -218,11 +219,15 @@ Three skills let Claude drive this tool for you:
   component-source directions. It then writes `screens/<name>.md` and `directions/<name>.md` and prints one `run`
   command per direction.
 - `design-loop` runs the loop, summarises the report, and waits for you to approve.
+- `/notion-design-sync` publishes a one-way, read-only board of every run into a Notion database through the Notion
+  MCP server: one row per run (state, best score, gate, open blockers and majors, approval, Figma frame link),
+  upserted on the run directory's name, with a write-once briefing page. Nothing syncs back, and screenshots,
+  reports and critique text never leave the machine. Its sync state is `.design-loop/notion-sync.json`.
 
 ### Install the skills
 
 ```
-for s in design-loop design-setup start-design; do ln -s "$PWD/skills/$s" ~/.claude/skills/$s; done
+for s in design-loop design-setup start-design notion-design-sync; do ln -s "$PWD/skills/$s" ~/.claude/skills/$s; done
 ```
 
 Then ask Claude to "design the home screen with design-loop". It runs the commands above, summarises the report,

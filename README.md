@@ -216,7 +216,7 @@ Four skills let Claude drive this tool for you:
   `brief.md`, writes `project.json`, and stops when `check` is green.
 - `/start-design` is the brief. It asks what kind of work this is (a new screen, improving an existing frame, the
   missing states of a screen, or porting a screen from the app's code), the content, and two or three
-  component-source directions. It then writes `screens/<name>.md` and `directions/<name>.md` and prints one `run`
+  art directions, each shown as a wireframe sketch you react to before it is written down. It then writes `screens/<name>.md` and `directions/<name>.md` and prints one `run`
   command per direction.
 - `design-loop` runs the loop, summarises the report, and waits for you to approve.
 - `/notion-design-sync` publishes a one-way, read-only board of every run into a Notion database through the Notion

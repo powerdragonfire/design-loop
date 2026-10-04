@@ -35,7 +35,7 @@ pnpm --dir "${DESIGN_LOOP_HOME:-$HOME/Projects/design-loop}" design-loop --desig
 | Mode | When | v00 is | Run flag |
 |---|---|---|---|
 | New screen | Nothing exists yet | built from the spec | none |
-| Improve existing | A frame exists and is not good enough | that frame, scored as it stands | `--from <nodeId>` |
+| Improve existing | A frame exists and is not good enough | a duplicate of that frame with the chosen direction applied (`--seed`). Use `--from` only for token-level polish: it scores the frame as it stands and never applies the direction up front, so the chair's small fixes return a near-identical screen | `--seed <nodeId>` |
 | Missing states | A screen exists, a state of it does not (empty, loading, error, offline, permission denied, no results, dark) | a duplicate of the base frame, changed to the state | `--seed <nodeId>` |
 | Port from app code | The screen exists in the app's code, not in Figma | built to match the code, then improved | none; the spec's `## Starting point` names the code file |
 
@@ -171,5 +171,5 @@ dl run join-trip --direction 0
 dl run join-trip --direction 1
 ```
 
-Add `--from <nodeId>` (improve) or `--seed <nodeId>` (missing states) to every line. Then say: "Run these with the
+Add `--seed <nodeId>` (improve or missing states) to every line. Use `--from <nodeId>` instead only when the user asked for polish with no layout change. Then say: "Run these with the
 `design-loop` skill. Each run stops on its own. Compare the reports, then approve one version."

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-FFpVLPhEB2V6i1DIz9+MXpk4CRjvGXznclBYv5Ea+TM='">
+<title>Design review: trip-overview</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#15181d;--muted:#5b6470;--line:#d9dde3;--code:#eef0f3;--accent:#1f5fd6;--good:#0c6b3a;--goodbg:#dff3e7;--bad:#a3271d;--badbg:#fbe4e1;--warn:#7a4b00;--warnbg:#fff0cc}
+@media(prefers-color-scheme:dark){:root{--bg:#101318;--card:#181c23;--text:#e8ebef;--muted:#9aa4b1;--line:#2b313b;--code:#242a33;--accent:#7aa7ff;--good:#6fdc9c;--goodbg:#12301f;--bad:#ff9d92;--badbg:#3a1a17;--warn:#ffd27a;--warnbg:#3a2d0c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,sans-serif}
+main{max-width:1400px;margin:0 auto;padding:16px}
+h1{font-size:1.5rem;margin:0 0 .5rem}h2{font-size:1.2rem;margin:0}h3{font-size:.95rem;margin:1rem 0 .25rem}
+code,pre{font:.85rem/1.4 ui-monospace,monospace;background:var(--code);border-radius:4px}
+code{padding:.05rem .3rem;overflow-wrap:anywhere}pre{padding:.6rem;white-space:pre-wrap;overflow-wrap:anywhere;margin:.5rem 0 0}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin-bottom:16px}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem;margin:0}dt{color:var(--muted)}dd{margin:0}
+.warn{background:var(--warnbg);color:var(--warn);border:1px solid var(--warn);border-radius:8px;padding:12px 16px;margin-bottom:16px}
+.warn ul{margin:.25rem 0 0;padding-left:1.25rem}
+.cmd{display:flex;gap:.5rem;align-items:center;margin:.4rem 0}.cmd code{flex:1;padding:.4rem .6rem}
+.copy{display:none;font:inherit;font-size:.85rem;padding:.3rem .7rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--text);cursor:pointer}
+.js .copy{display:inline-block}
+.versions{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:16px;align-items:start}
+.version{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;min-width:0}
+.version.approved{border:2px solid var(--good)}
+.candidate-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px;margin-top:.5rem}
+.candidate{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:0}
+.candidate.winner{border:2px solid var(--good)}
+.candidate.approved{border:2px solid var(--accent)}
+.head{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-bottom:.5rem}
+img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:6px}
+.badge,.tag,.sev,.chip{display:inline-block;font-size:.75rem;font-weight:600;padding:.05rem .5rem;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+.badge.pick{background:var(--accent);color:var(--bg);border-color:var(--accent)}.badge.pass,.badge.approved,.tag.resolved{background:var(--goodbg);color:var(--good);border-color:var(--good)}
+.tag.new,.sev.blocker,.sev.major,.tag.gone{background:var(--badbg);color:var(--bad);border-color:var(--bad)}
+.tag.persisted{background:var(--warnbg);color:var(--warn);border-color:var(--warn)}
+.score{font-size:1.4rem;font-weight:700}.delta{color:var(--muted);margin-left:.4rem}
+.chips{display:flex;flex-wrap:wrap;gap:.3rem;margin:.4rem 0}.chip{font-weight:400}
+.gate.fail{color:var(--bad)}.gate.ok{color:var(--good)}
+ul.issues{list-style:none;margin:0;padding:0}ul.issues li{border-top:1px solid var(--line);padding:.4rem 0;overflow-wrap:anywhere}
+.muted{color:var(--muted)}summary{cursor:pointer}
+</style></head>
+<body><main>
+<div class="warn" role="note"><strong>Sample report.</strong> Made-up data from <code>scripts/example-report.ts</code>, not a real run. The screenshots are wireframes.</div>
+<header class="panel"><h1>trip-overview <span class="muted">2026-10-03</span></h1>
+<dl>
+<dt>Stop reason</dt><dd><strong>pass</strong></dd>
+<dt>Noise floor</dt><dd>σ = 3.1</dd>
+<dt>Spend</dt><dd>$1.42 · 4 Stitch generations · 182000 in / 21000 out / 96000 cached tokens</dd>
+<dt>Committee pick</dt><dd>v02</dd>
+<dt>Your approval</dt><dd>Not yet approved</dd>
+<dt>Hallucinated evidence</dt><dd>typography 5% · behavioural 0% · accessibility 10%</dd>
+</dl></header>
+
+<div class="panel"><h2>How to approve</h2>
+<p class="muted">This page cannot approve for you. Run one command in a terminal; the committee's pick is first.</p>
+<div>v02<div class="cmd"><code>design-loop approve design/runs/2026-10-03-trip-overview v02</code><button type="button" class="copy">Copy</button></div></div><div>v01<div class="cmd"><code>design-loop approve design/runs/2026-10-03-trip-overview v01</code><button type="button" class="copy">Copy</button></div></div><div>v00<div class="cmd"><code>design-loop approve design/runs/2026-10-03-trip-overview v00</code><button type="button" class="copy">Copy</button></div></div></div>
+
+<section class="panel candidates" data-gallery="candidates">
+<h2>2 candidates</h2>
+
+<div class="candidate-grid">
+<div class="candidate winner" data-candidate="c0">
+<div class="head"><h3>c0</h3><span class="chip">family 0</span><span class="badge pick">Winner</span></div>
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMUAAAGqCAIAAAA0jxecAAAE8ElEQVR4nO3dIW5cMRRA0SxkwIAqS+6KggdVwYXFJZWKwkprcPXtbx/pLMCSL3qW/N7+/vkNlbfpJ2AneqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0pDPb0/H/wz/c5Wpic96UlPq9KTnvSkp1XpSU960tOq9KQnPelpVXrS0+U9wSA9UdITJT1R0hMlPVHSEyU9URrq6fP1wa3piZKeKOmJkp4ordUTDNITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9URrq6dfPH6AnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0oX9TR9Qc+NTG9CT1uZ3oSetjK9CT1tZXoTetrK9Cb0tJXpTdygJw6hJ0p6oqQnSnqipCdKeqKkJ0p6oqQnShf1NH25G/+lJ0p6oqQnSnqidKeeOISeKOmJkp4o6YmSnijpidJFPU0frhxCT+hJT6vSE3rS06pO6YlD6ImSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4oZT3BID1R0hMlPVHSEyU9UdITJT1R0hMlPVHy3sIoPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1Ruqin9+eDQdOb0NNWpjehp61Mb0JPW5nehJ62Mr0JPW1lehM36IlD6ImSnijpiZKeKOmJkp4o6YmSnijpidJFPX2+PlicnijpiZKeKOmJ0p164hB6oqQnSnqipCdKeqKkJ0oX9TR9uHIIPaEnPa1KT+hJT6s6pScOoSdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqilPUEg/RESU+U9ERJT5T0RElPlPRESU+U9ETJewuj9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRE6aKe3p8PBk1vQk9bmd6EnrYyvQk9bWV6E3rayvQm9LSV6U3coCcOoSdKeqKkJ0p6oqQnSnqipCdKeqKkJ0oX9fT5+mBxeqKkJ0p6oqQnSnfqiUPoiZKeKOmJkp4o6YmSnihd1NP04coh9ISe9LQqPaEnPa3qlJ44hJ4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJUtYTDNITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSE6Wx/3q+fwM9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1RynqCQXqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqi9AWMsKVDA/zSnQAAAABJRU5ErkJggg==" alt="Screenshot of candidate c0">
+<p><span class="score">61.2</span><span class="delta">1 blocker</span></p>
+<p class="gate fail">Gate: not passed</p>
+<div class="cmd"><code>design-loop approve design/runs/2026-10-03-trip-overview c0</code><button type="button" class="copy">Copy</button></div>
+</div>
+<div class="candidate" data-candidate="c1">
+<div class="head"><h3>c1</h3><span class="chip">family 1</span></div>
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMUAAAGqCAIAAAA0jxecAAAE70lEQVR4nO3dIY5cMRBAwT3IgAHRHjknWjwoWhy4OCRSUFhoDJ6+/e2S6gCW/FA36Lc/v39B5W36C9iJnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpidJQT+/PB/9M/7OV6UlPetLTqvSkJz3paVV60pOe9LQqPelJT3palZ70dHlPMEhPlPRESU+U9ERJT5T0RElPlIZ6+nx9cGt6oqQnSnqipCdKa/UEg/RESU+U9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlIZ6+vr5A/RESU+U9ERJT5T0RElPlPRESU+U9ERJT5T0ROminqYf6LmR6U3oaSvTm9DTVqY3oaetTG9CT1uZ3oSetjK9iRv0xCH0RElPlPRESU+U9ERJT5T0RElPlPRE6aKeph9347/0RElPlPRESU+U7tQTh9ATJT1R0hMlPVHSEyU9Ubqop+nDlUPoCT3paVV6Qk96WtUpPXEIPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hOlrCcYpCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0r2LYzSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hOli3p6fz4YNL0JPW1lehN62sr0JvS0lelN6Gkr05vQ01amN3GDnjiEnijpiZKeKOmJkp4o6YmSnijpiZKeKF3U0+frg8XpiZKeKOmJkp4o3aknDqEnSnqipCdKeqKkJ0p6onRRT9OHK4fQE3rS06r0hJ70tKpTeuIQeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKWU8wSE+U9ERJT5T0RElPlPRESU+U9ERJT5TsWxilJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKF/X0/nwwaHoTetrK9Cb0tJXpTehpK9Ob0NNWpjehp61Mb+IGPXEIPVHSEyU9UdITJT1R0hMlPVHSEyU9Ubqop8/XB4vTEyU9UdITJT1RulNPHEJPlPRESU+U9ERJT5T0ROminqYPVw6hJ/Skp1XpCT3paVWn9MQh9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRESU+Usp5gkJ4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKA319PX9G+iJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YlS1hMM0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hOlv0qVpUMchWnVAAAAAElFTkSuQmCC" alt="Screenshot of candidate c1">
+<p><span class="score">54.8</span><span class="delta">2 blockers</span></p>
+<p class="gate fail">Gate: not passed</p>
+<div class="cmd"><code>design-loop approve design/runs/2026-10-03-trip-overview c1</code><button type="button" class="copy">Copy</button></div>
+</div>
+</div>
+</section>
+<div class="versions">
+<section class="version" data-version="v00">
+<div class="head"><h2>v00</h2></div>
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMUAAAGqCAIAAAA0jxecAAAE8ElEQVR4nO3dIW5cMRRA0SxkwIAqS+6KggdVwYXFJZWKwkprcPXtbx/pLMCSL3qW/N7+/vkNlbfpJ2AneqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0pDPb0/H/wz/c5Wpic96UlPq9KTnvSkp1XpSU960tOq9KQnPelpVXrS0+U9wSA9UdITJT1R0hMlPVHSEyU9URrq6fP1wa3piZKeKOmJkp4ordUTDNITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9URrq6dfPH6AnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0oX9TR9Qc+NTG9CT1uZ3oSetjK9CT1tZXoTetrK9Cb0tJXpTdygJw6hJ0p6oqQnSnqipCdKeqKkJ0p6oqQnShf1NH25G/+lJ0p6oqQnSnqidKeeOISeKOmJkp4o6YmSnijpidJFPU0frhxCT+hJT6vSE3rS06pO6YlD6ImSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4oZT3BID1R0hMlPVHSEyU9UdITJT1R0hMlPVHy3sIoPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1Ruqin9+eDQdOb0NNWpjehp61Mb0JPW5nehJ62Mr0JPW1lehM36IlD6ImSnijpiZKeKOmJkp4o6YmSnijpidJFPX2+PlicnijpiZKeKOmJ0p164hB6oqQnSnqipCdKeqKkJ0oX9TR9uHIIPaEnPa1KT+hJT6s6pScOoSdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqilPUEg/RESU+U9ERJT5T0RElPlPRESU+U9ETJewuj9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRE6aKe3p8PBk1vQk9bmd6EnrYyvQk9bWV6E3rayvQm9LSV6U3coCcOoSdKeqKkJ0p6oqQnSnqipCdKeqKkJ0oX9fT5+mBxeqKkJ0p6oqQnSnfqiUPoiZKeKOmJkp4o6YmSnihd1NP04coh9ISe9LQqPaEnPa3qlJ44hJ4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJUtYTDNITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSE6Wx/3q+fwM9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1RynqCQXqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqi9AWMsKVDA/zSnQAAAABJRU5ErkJggg==" alt="Screenshot of v00">
+<p><span class="score">61.2</span><span class="delta">— vs previous version</span></p>
+<p class="gate fail">Gate: not passed — 1 open blocker: accessibility-001; 2 open majors: accessibility-002, behavioural-001</p>
+<div class="chips"><span class="chip">accessibility <b>53.2</b></span><span class="chip">behavioural <b>57.2</b></span><span class="chip">feasibility <b>67.2</b></span><span class="chip">tokenConformance <b>66.2</b></span><span class="chip">typography <b>63.2</b></span></div>
+
+
+<div class="cmd"><code>design-loop approve design/runs/2026-10-03-trip-overview v00</code><button type="button" class="copy">Copy</button></div>
+<details><summary>Prompt that produced this version</summary><pre>First generation, art direction 1</pre></details>
+
+<h3>Issues</h3>
+<ul class="issues"><li><code>accessibility-001</code> <span class="sev blocker">blocker</span> <span class="tag persisted">open</span><br>The Respond button is 36px tall, under the 44px touch minimum.<br><span class="muted">element <code>button.respond</code></span></li><li><code>accessibility-002</code> <span class="sev major">major</span> <span class="tag persisted">open</span><br>Card meta text has a 2.4:1 contrast ratio, under the 4.5:1 minimum.<br><span class="muted">element <code>p.meta</code></span></li><li><code>behavioural-001</code> <span class="sev major">major</span> <span class="tag persisted">open</span><br>The primary action sits below the fold on a 393x852 screen.<br><span class="muted">element <code>button.respond</code></span></li><li><code>typography-001</code> <span class="sev minor">minor</span> <span class="tag persisted">open</span><br>Card titles use 19px, off the type scale (18px or 20px).<br><span class="muted">element <code>h2.title</code></span></li><li><code>tokenConformance-001</code> <span class="sev minor">minor</span> <span class="tag persisted">open</span><br>Card radius is 10px, the radius-md token is 12px.<br><span class="muted">element <code>div.card</code></span></li></ul>
+</section>
+<section class="version" data-version="v01">
+<div class="head"><h2>v01</h2></div>
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMUAAAGqCAIAAAA0jxecAAAE8ElEQVR4nO3dIW5cMRRA0SxkwIAqS+6KggdVwYXFJZWKwkprcPXtbx/pLMCSL3q29N7+/vkNlbfpJ2AneqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0pDPb0/H/wz/c5Wpic96UlPq9KTnvSkp1XpSU960tOq9KQnPelpVXrS0+U9wSA9UdITJT1R0hMlPVHSEyU9URrq6fP1wa3piZKeKOmJkp4ordUTDNITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9URrq6dfPH6AnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0oX9TR9Qc+NTG9CT1uZ3oSetjK9CT1tZXoTetrK9Cb0tJXpTdygJw6hJ0p6oqQnSnqipCdKeqKkJ0p6oqQnShf1NH25G/+lJ0p6oqQnSnqidKeeOISeKOmJkp4o6YmSnijpidJFPU0frhxCT+hJT6vSE3rS06pO6YlD6ImSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4oZT3BID1R0hMlPVHSEyU9UdITJT1R0hMlPVHy3sIoPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1Ruqin9+eDQdOb0NNWpjehp61Mb0JPW5nehJ62Mr0JPW1lehM36IlD6ImSnijpiZKeKOmJkp4o6YmSnijpidJFPX2+PlicnijpiZKeKOmJ0p164hB6oqQnSnqipCdKeqKkJ0oX9TR9uHIIPaEnPa1KT+hJT6s6pScOoSdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqilPUEg/RESU+U9ERJT5T0RElPlPRESU+U9ETJewuj9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRE6aKe3p8PBk1vQk9bmd6EnrYyvQk9bWV6E3rayvQm9LSV6U3coCcOoSdKeqKkJ0p6oqQnSnqipCdKeqKkJ0oX9fT5+mBxeqKkJ0p6oqQnSnfqiUPoiZKeKOmJkp4o6YmSnihd1NP04coh9ISe9LQqPaEnPa3qlJ44hJ4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJUtYTDNITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSE6Wx/77fv4GeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnihlPcEgPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1R+gJnId1yooVevQAAAABJRU5ErkJggg==" alt="Screenshot of v01">
+<p><span class="score">74.6</span><span class="delta">+13.4 vs previous version</span></p>
+<p class="gate fail">Gate: not passed — 1 open major: accessibility-002</p>
+<div class="chips"><span class="chip">accessibility <b>70</b></span><span class="chip">behavioural <b>78</b></span><span class="chip">feasibility <b>82</b></span><span class="chip">tokenConformance <b>80</b></span><span class="chip">typography <b>76</b></span></div>
+
+<p class="muted">built from v00</p>
+<div class="cmd"><code>design-loop approve design/runs/2026-10-03-trip-overview v01</code><button type="button" class="copy">Copy</button></div>
+<details><summary>Prompt that produced this version</summary><pre>Raise the Respond button to 48px. Switch card meta text to ink-muted. Move Respond above y = 753px.</pre></details>
+<h3>This edit targeted</h3><ul class="issues"><li><code>accessibility-001</code><br>The Respond button is 36px tall, under the 44px touch minimum.</li><li><code>accessibility-002</code><br>Card meta text has a 2.4:1 contrast ratio, under the 4.5:1 minimum.</li><li><code>behavioural-001</code><br>The primary action sits below the fold on a 393x852 screen.</li></ul><p class="muted">The chair asked for 4 changes; the top 3 were kept.</p>
+<h3>Issues <span class="muted">against v00</span></h3>
+<ul class="issues"><li><code>accessibility-002</code> <span class="sev major">major</span> <span class="tag persisted">persisted</span><br>Card meta text has a 2.4:1 contrast ratio, under the 4.5:1 minimum.<br><span class="muted">element <code>p.meta</code></span></li><li><code>typography-001</code> <span class="sev minor">minor</span> <span class="tag persisted">persisted</span><br>Card titles use 19px, off the type scale (18px or 20px).<br><span class="muted">element <code>h2.title</code></span></li><li><code>accessibility-001</code> <span class="sev blocker">blocker</span> <span class="tag resolved">resolved (verified)</span><br>The Respond button is 36px tall, under the 44px touch minimum.<br><span class="muted">element <code>button.respond</code></span></li><li><code>behavioural-001</code> <span class="sev major">major</span> <span class="tag gone">gone without verification</span><br>The primary action sits below the fold on a 393x852 screen.<br><span class="muted">element <code>button.respond</code></span></li><li><code>tokenConformance-001</code> <span class="sev minor">minor</span> <span class="tag resolved">resolved (verified)</span><br>Card radius is 10px, the radius-md token is 12px.<br><span class="muted">element <code>div.card</code></span></li></ul>
+</section>
+<section class="version" data-version="v02">
+<div class="head"><h2>v02</h2><span class="badge pick">Committee pick</span><span class="badge pass">Passed the gate</span></div>
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMUAAAGqCAIAAAA0jxecAAAE9ElEQVR4nO3dIW5cMRRA0SxkwIAqS+6KggdVwYXFJZWKwkprcPXtbx/pLMCSL3q25be/f35D5W36CtiJnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpidJQT+/PB/9M37OV6UlPetLTqvSkJz3paVV60pOe9LQqPelJT3palZ70dHlPMEhPlPRESU+U9ERJT5T0RElPlIZ6+nx9cGt6oqQnSnqipCdKa/UEg/RESU+U9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlIZ6+vXzB+iJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpidJFPU3/oOdGpjehp61Mb0JPW5nehJ62Mr0JPW1lehN62sr0Jm7QE4fQEyU9UdITJT1R0hMlPVHSEyU9UdITpYt6mv65G/+lJ0p6oqQnSnqidKeeOISeKOmJkp4o6YmSnijpidJFPU0frhxCT+hJT6vSE3rS06pO6YlD6ImSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4oZT3BID1R0hMlPVHSEyU9UdITJT1R0hMlPVFy3sIoPVHSEyU9UdITJT1R0hMlPVHSEyU9UdITJT1Ruqin9+eDQdOb0NNWpjehp61Mb0JPW5nehJ62Mr0JPW1lehM36IlD6ImSnijpiZKeKOmJkp4o6YmSnijpidJFPX2+PlicnijpiZKeKOmJ0p164hB6oqQnSnqipCdKeqKkJ0oX9TR9uHIIPaEnPa1KT+hJT6s6pScOoSdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqipCdKeqKkJ0p6oqQnSnqilPUEg/RESU+U9ERJT5T0RElPlPRESU+U9ETJeQuj9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRE6aKe3p8PBk1vQk9bmd6EnrYyvQk9bWV6E3rayvQm9LSV6U3coCcOoSdKeqKkJ0p6oqQnSnqipCdKeqKkJ0oX9fT5+mBxeqKkJ0p6oqQnSnfqiUPoiZKeKOmJkp4o6YmSnihd1NP04coh9ISe9LQqPaEnPa3qlJ44hJ4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJUtbT9KexrCDrCQbpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4ojd33/f4N9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPRESU+U9ERJT5T0RElPlPREKesJBumJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpiZKeKOmJkp4o6YmSnijpidIXm0yKU8ceNu4AAAAASUVORK5CYII=" alt="Screenshot of v02">
+<p><span class="score">88.1</span><span class="delta">+13.5 vs previous version</span></p>
+<p class="gate ok">Gate: passed</p>
+<div class="chips"><span class="chip">accessibility <b>87</b></span><span class="chip">behavioural <b>86</b></span><span class="chip">feasibility <b>88</b></span><span class="chip">tokenConformance <b>90</b></span><span class="chip">typography <b>90</b></span></div>
+
+<p class="muted">built from v01</p>
+<div class="cmd"><code>design-loop approve design/runs/2026-10-03-trip-overview v02</code><button type="button" class="copy">Copy</button></div>
+<details><summary>Prompt that produced this version</summary><pre>Switch card meta text to ink-muted. Set card titles to the 18px title-md token.</pre></details>
+<h3>This edit targeted</h3><ul class="issues"><li><code>accessibility-002</code><br>Card meta text has a 2.4:1 contrast ratio, under the 4.5:1 minimum.</li><li><code>typography-001</code><br>Card titles use 19px, off the type scale (18px or 20px).</li></ul>
+<h3>Issues <span class="muted">against v01</span></h3>
+<ul class="issues"><li><code>accessibility-002</code> <span class="sev major">major</span> <span class="tag resolved">resolved (verified)</span><br>Card meta text has a 2.4:1 contrast ratio, under the 4.5:1 minimum.<br><span class="muted">element <code>p.meta</code></span></li><li><code>typography-001</code> <span class="sev minor">minor</span> <span class="tag resolved">resolved (verified)</span><br>Card titles use 19px, off the type scale (18px or 20px).<br><span class="muted">element <code>h2.title</code></span></li></ul>
+</section>
+</div>
+</main>
+<script>document.documentElement.classList.add("js");
+document.addEventListener("click", function (e) {
+  var b = e.target.closest && e.target.closest("button.copy");
+  if (!b) return;
+  var code = b.previousElementSibling;
+  var done = function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1500); };
+  if (navigator.clipboard) { navigator.clipboard.writeText(code.textContent).then(done); return; }
+  var r = document.createRange(); r.selectNodeContents(code);
+  var s = getSelection(); s.removeAllRanges(); s.addRange(r);
+  if (document.execCommand("copy")) done();
+});</script>
+</body></html>

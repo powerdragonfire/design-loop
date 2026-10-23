@@ -72,6 +72,8 @@ design/
 
 `runScreen` (`src/cli/run.ts`) is the orchestrator. It picks `v00`, then loops: edit, measure, critique, score, stop or ask the chair for the next edit.
 
+What a finished run looks like: [`docs/example-report.html`](docs/example-report.html), a sample report on made-up data (download it and open it from disk; GitHub shows only the source). Rebuild it with `pnpm tsx scripts/example-report.ts`.
+
 ```mermaid
 flowchart TD
     A([run screen]) --> B[loadContract, check quota and sigma, open run dir]

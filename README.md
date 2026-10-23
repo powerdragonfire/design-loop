@@ -68,6 +68,77 @@ design/
 
 `smoke`, `calibrate`, `ab-distiller` and `run` need credentials; the rest read the run directory only.
 
+## How a run flows
+
+`runScreen` (`src/cli/run.ts`) is the orchestrator. It picks `v00`, then loops: edit, measure, critique, score, stop or ask the chair for the next edit.
+
+```mermaid
+flowchart TD
+    A([run screen]) --> B[loadContract, check quota and sigma, open run dir]
+    B --> C{agent mode and one candidate?}
+    C -- no --> D[candidate stage: generate, measure and critique every candidate, pick winner]
+    C -- yes --> E[agent round 0: generate one screen, critics may suspend]
+    D --> F[winner becomes v00]
+    E --> F
+    F --> G{decide: stop?}
+    G -- "pass / converged / budget" --> Z
+    G -- no --> H[chair writes next prompt and picks the version to build from]
+    H --> I[edit: duplicate base version, apply prompt]
+    I --> J[fetch html + image, measure, distill]
+    J --> K[write vNN inputs, run 4 critics + deterministic critique]
+    K --> L{critic or design pending?}
+    L -- yes --> S([suspend: work-order.json, exit 10])
+    S -. "step resumes, replays disk" .-> I
+    L -- no --> M[validate evidence, score, gate, write vNN]
+    M --> G
+    G -. "error after v00" .-> Y[stopReason = aborted]
+    Y --> Z[rank rounds, finalise manifest]
+    Z --> R([report])
+```
+
+```text
+runScreen(screen)
+  contract = loadContract(); sigma = contract.sigma (refuse if null)
+  refuse early: Stitch quota too low, bad pricing, stale calibration
+  run = openRun()
+
+  seed = candidateStage()          # families x (1 + variants) candidates, best one wins
+       | agentRoundZero()          # agent mode, one candidate: score it like any edit round
+  rounds = [v00]
+
+  loop:
+    decision = decide(rounds)      # stop rule, see below
+    if decision.stop: break
+    if last round regressed vs best:
+      chair works from best version, told what broke
+    prompt, parent = chair(last.critiques, last.openIssues)
+    archive chair answer under last version
+
+    n += 1
+    screen = parent.edit(prompt)               # figma: suspends until the operator builds it
+    measure(screen); write vNN inputs to disk
+    critiques = committee(4 critics)           # agent mode: suspends until subagents answer
+    critiques = validateEvidence(critiques)    # drop claims the measured doc does not support
+    score = composite(critiques + deterministic)
+    open  = openIssues(critiques, carried)
+    gate  = gate(critiques, measurementsPass)
+    rounds.push(vNN)
+
+  on WorkOrderPending | DesignPending: rethrow (run stays open, `step` resumes)
+  on other error with rounds > 0:      stopReason = "aborted"
+  finalise(rank = sort(rounds, compareRounds), spend, candidates)
+
+decide(rounds):
+  best = top of compareRounds    # gate pass, then fewest blockers, then majors, then composite
+  if last.gatePass:                     return "pass"
+  if streak of no-progress rounds >= convergenceRounds:
+                                        return "converged"
+  if edits >= maxRounds:                return "budget"
+  return continue
+  # progress = composite beats prior best by convergenceSigmas * sigma,
+  #            or fewer blockers/majors than every prior round
+```
+
 ## Generating more than one candidate
 
 Left alone, `run` does exactly what it always has: one Stitch generation, iterated by the edit loop. To have
@@ -216,7 +287,7 @@ Four skills let Claude drive this tool for you:
   `brief.md`, writes `project.json`, and stops when `check` is green.
 - `/start-design` is the brief. It asks what kind of work this is (a new screen, improving an existing frame, the
   missing states of a screen, or porting a screen from the app's code), the content, and two or three
-  component-source directions. It then writes `screens/<name>.md` and `directions/<name>.md` and prints one `run`
+  art directions, each shown as a wireframe sketch you react to before it is written down. It then writes `screens/<name>.md` and `directions/<name>.md` and prints one `run`
   command per direction.
 - `design-loop` runs the loop, summarises the report, and waits for you to approve.
 - `/notion-design-sync` publishes a one-way, read-only board of every run into a Notion database through the Notion
